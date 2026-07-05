@@ -460,38 +460,44 @@ export class Plugin extends AppPlugin {
     // ---------- root: query (single ranked list, native parity) ----------
 
     _rootQueryEntries(q) {
+        // Native orders one mixed list by ROW TYPE first, then match score within each
+        // type (observed 2026-07-05): collection-enter rows → all Open Collection rows →
+        // views → pages → create rows → settings → the searchByQuery tail. Each row gets
+        // a typeRank; we sort by (typeRank asc, score desc). Score comes from a best-match
+        // fuzzy scorer so e.g. "Open Collection 'Notes'" ranks on the "Not" in Notes.
         const scored = [];
-        const add = (m, row) => { if (m) scored.push(Object.assign(row, { score: m.score + (row.boost || 0), indices: m.indices })); };
+        const add = (rank, m, row) => { if (m) scored.push(Object.assign(row, { rank, score: m.score, indices: m.indices })); };
 
         for (const c of this._cols) {
-            const nameM = fuzzyMatch(q, c.name);
-            if (nameM) {
-                // Collection row (enters submenu) + separate Open row, like native.
-                add(nameM, {
-                    label: c.name, icon: c.icon || "ti-database", arrow: true, boost: 4,
-                    action: () => this._enterCollection(c),
-                });
-                const openLabel = `Open Collection '${c.name}'`;
-                add(fuzzyMatch(q, openLabel) || nameM && { score: nameM.score, indices: null }, {
-                    label: openLabel, icon: c.icon || "ti-database", boost: 2,
-                    action: (opts) => this._openView(c.guid, null, opts),
-                });
-            }
+            // Enter-submenu row — only when the collection NAME matches (native).
+            add(0, fuzzyMatch(q, c.name), {
+                label: c.name, icon: c.icon || "ti-database", arrow: true,
+                action: () => this._enterCollection(c),
+            });
+            // Open Collection row — matched on the whole label, so its "Open Collection"
+            // prefix makes it appear for many queries (native shows every collection's
+            // Open row for e.g. "not"). Ranked by the full-label best-match score, which
+            // floats the name-matching collection (Open 'Notes' for "not") to the top.
+            const openLabel = `Open Collection '${c.name}'`;
+            add(1, fuzzyMatch(q, openLabel), {
+                label: openLabel, icon: c.icon || "ti-database",
+                action: (opts) => this._openView(c.guid, null, opts),
+            });
             for (const v of c.views) {
-                add(fuzzyMatch(q, v.label), {
+                add(2, fuzzyMatch(q, v.label), {
                     label: v.label, icon: v.icon || "ti-layout-list", sub: c.name,
                     action: (opts) => this._openView(c.guid, v.id, opts),
                 });
             }
             if (!c.isJournal && !c.isDynamic) {
                 // Label carries both collection name and item_name, so fuzzy matches either.
-                add(fuzzyMatch(q, `${c.name}: New ${c.itemName}`), {
+                add(4, fuzzyMatch(q, `${c.name}: New ${c.itemName}`), {
                     label: `${c.name}: New ${c.itemName}`, icon: "ti-plus",
                     action: () => this._createRecord(c, null),
                 });
             }
-            add(fuzzyMatch(q, `${c.name}: Collection Settings...`), {
-                label: `${c.name}: Collection Settings...`, icon: "ti-settings", boost: -2,
+            add(5, fuzzyMatch(q, `${c.name}: Collection Settings...`), {
+                label: `${c.name}: Collection Settings...`, icon: "ti-settings",
                 action: () => this._openCollectionSettings(c),
             });
         }
@@ -504,17 +510,19 @@ export class Plugin extends AppPlugin {
                 const m = fuzzyMatch(q, r.getName() || "");
                 if (!m) continue;
                 seen.add(r.guid);
-                add(m, this._pageRow(r, colEntry, 6));
+                add(3, m, this._pageRow(r, colEntry));
             }
         }
+        // searchByQuery tail — records the app matched (often on body text) that the
+        // title fuzzy didn't; rank 6, below the typed-title matches, like native.
         for (const r of this._searchRecs) {
             if (seen.has(r.guid)) continue;
             const colEntry = this._recCol.get(r.guid) || null;
-            const m = fuzzyMatch(q, r.getName() || "") || { score: 1, indices: null };
-            add(m, this._pageRow(r, colEntry, 6));
+            const m = fuzzyMatch(q, r.getName() || "");
+            add(6, m || { score: 0, indices: [] }, this._pageRow(r, colEntry));
         }
 
-        scored.sort((a, b) => b.score - a.score);
+        scored.sort((a, b) => a.rank - b.rank || b.score - a.score);
         const entries = scored.slice(0, MAX_RESULTS);
 
         // Date query → journal jump row on top (native shows calendar + jump row).
@@ -549,12 +557,11 @@ export class Plugin extends AppPlugin {
         return entries;
     }
 
-    _pageRow(record, colEntry, boost) {
+    _pageRow(record, colEntry) {
         return {
             label: record.getName() || "(untitled)",
             icon: safeIcon(record) || (colEntry && colEntry.icon) || "ti-file",
             sub: colEntry ? colEntry.name : null,
-            boost,
             action: (opts) => this._openRecord(record.guid, opts),
         };
     }
@@ -618,7 +625,7 @@ export class Plugin extends AppPlugin {
 
         const records = this._colRecords.get(entry.guid) || [];
         const itemRows = filter(records.map((r) => {
-            const row = this._pageRow(r, entry, 0);
+            const row = this._pageRow(r, entry);
             row.sub = null; // collection label is redundant inside its own submenu
             return row;
         }));
@@ -799,32 +806,53 @@ function esc(s) {
         .replace(/"/g, "&quot;");
 }
 
-// Fuzzy subsequence match (native-palette style): every query char must appear in
-// order; scores favor consecutive runs, word starts, tight/early matches.
+const WORD_SEP = /[\s\-_:'".(/\\]/;
+
+// Best-match fuzzy scorer (fzf-style DP). Every query char must appear in order, but
+// unlike a greedy left-to-right scan it picks the highest-scoring subsequence — so
+// "Open Collection 'Notes'" scores/highlights on the contiguous "Not" in Notes, not the
+// scattered n…o…t in the prefix. Bonuses for consecutive runs and word starts; small
+// penalties for gaps, late starts, and length. Returns {score, indices} or null.
+// O(m·n²) with tiny m,n (palette labels) — negligible.
 function fuzzyMatch(query, text) {
     const t = String(text || "");
     const tl = t.toLowerCase();
-    const q = String(query || "").toLowerCase();
+    const q = String(query || "").toLowerCase().replace(/ /g, ""); // spaces optional
     if (!q) return { score: 0, indices: [] };
-    const indices = [];
-    let score = 0;
-    let pos = 0;
-    let prev = -2;
-    for (const ch of q) {
-        const found = tl.indexOf(ch, pos);
-        if (found < 0) {
-            if (ch === " ") continue; // spaces in the query are optional
-            return null;
+    const n = tl.length, m = q.length;
+    if (m > n) return null;
+    const NEG = -1e9;
+    const isStart = (j) => j === 0 || WORD_SEP.test(t[j - 1]);
+    // score[i][j] = best score matching q[0..i] with q[i] placed at text position j.
+    const score = [], back = [];
+    for (let i = 0; i < m; i++) { score.push(new Float64Array(n).fill(NEG)); back.push(new Int32Array(n).fill(-1)); }
+    for (let i = 0; i < m; i++) {
+        for (let j = i; j < n; j++) {
+            if (tl[j] !== q[i]) continue;
+            const charScore = 1 + (isStart(j) ? 6 : 0);
+            if (i === 0) {
+                score[i][j] = charScore - Math.min(j, 12) * 0.5; // prefer early starts
+            } else {
+                let best = NEG, bestK = -1;
+                for (let k = i - 1; k < j; k++) {
+                    if (score[i - 1][k] === NEG) continue;
+                    let s = score[i - 1][k] + charScore;
+                    if (k === j - 1) s += 8;                       // consecutive run
+                    else s -= Math.min(j - k - 1, 12) * 0.5;       // gap penalty
+                    if (s > best) { best = s; bestK = k; }
+                }
+                if (bestK < 0) continue;
+                score[i][j] = best; back[i][j] = bestK;
+            }
         }
-        if (found === prev + 1) score += 8;
-        if (found === 0 || /[\s\-_:'".(/]/.test(t[found - 1])) score += 6;
-        score -= Math.min(found - pos, 12) * 0.5;
-        indices.push(found);
-        prev = found;
-        pos = found + 1;
     }
-    score -= tl.length * 0.05;
-    return { score, indices };
+    let best = NEG, bestJ = -1;
+    for (let j = m - 1; j < n; j++) if (score[m - 1][j] > best) { best = score[m - 1][j]; bestJ = j; }
+    if (bestJ < 0) return null;
+    const indices = [];
+    for (let i = m - 1, j = bestJ; i >= 0 && j >= 0; i--) { indices.push(j); j = back[i][j]; }
+    indices.reverse();
+    return { score: best - tl.length * 0.05, indices };
 }
 
 function highlightIndices(label, indices) {

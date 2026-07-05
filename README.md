@@ -48,10 +48,16 @@ reproduced — native apparently matches beyond title subsequences; ours is titl
 
 Implements the spec's full gap list:
 
-1. Fuzzy subsequence matching, one ranked mixed list when querying (fixed sections
-   dropped; native-observed row types: collection `→` + `Open Collection 'X'`, views,
-   pages, `X: New <item>` matching name OR item_name, `X: Collection Settings...`,
-   `Search for 'q' in all text` always last, create rows on no-match).
+1. Fuzzy matching + native result ordering (one ranked mixed list). Matcher is an
+   fzf-style best-match DP (`fuzzyMatch`) — it picks the highest-scoring subsequence, so
+   `Open Collection 'Notes'` ranks and highlights on the contiguous "Not" in *Notes*,
+   not the scattered n…o…t in the "Open Collection" prefix. Ordering matches native's
+   observed type-priority grouping (verified against native for "not", 2026-07-05): a
+   `rank` per row, sorted `(rank asc, score desc)` — 0 collection-enter `→` rows, 1 all
+   `Open Collection 'X'` rows (the prefix makes them match broad queries, like native),
+   2 views, 3 pages (title matches), 4 `X: New <item>` create rows, 5
+   `X: Collection Settings...`, 6 the `searchByQuery` tail (body-text matches the title
+   fuzzy missed). `Search for 'q' in all text` always last; create rows on no-match.
 2. Root empty query = native layout: `Press > to filter commands only... ⌘P` hint row,
    divider, collections (regular + dynamic; hidden-flagged badged), divider,
    `Open Today's Journal` (⌘J).
