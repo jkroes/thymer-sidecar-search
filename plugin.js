@@ -2,13 +2,21 @@
 // sidecar-search — replaces Cmd-K with a plugin-owned popup palette that also covers
 // collections hidden from the native palette (show_cmdpal_items: false).
 //
+// v2: native-palette parity per native-palette-spec.md (CDP-observed 2026-07-05):
+// fuzzy subsequence matching in one ranked list, inline action rows (Open Collection /
+// New <item> / Settings / Search-all-text / Create-in), native submenu ordering with
+// "← Back", Shift+Enter → other panel, date queries → journal jump row, "Open Today's
+// Journal", and "> command mode" delegation to the native palette. Tags pseudo-
+// collection is NOT replicated (no SDK hashtag enumeration).
+//
 // Shortcut model (live-verified via plugins/cmdp-probe, 2026-07-05, web app):
 // - We steal Cmd-K at window-capture BEFORE Thymer's handler (preventDefault +
 //   stopImmediatePropagation suppresses the native palette).
 // - Cmd+Shift+P is natively an alias of Cmd-K and we deliberately do NOT intercept it,
-//   so it remains the escape hatch to the native palette (needed for collection
-//   settings, which the SDK cannot navigate to — only 'edit_panel'/'overview' exist).
-// - The "Open native palette" row works because Thymer's listener ignores isTrusted.
+//   so it remains the escape hatch to the native palette.
+// - Synthetic dispatch works because Thymer's listeners ignore isTrusted. Routes used:
+//   ⌘P → native command mode; ⌘⇧P + typed query + Enter → collection Settings dialog;
+//   click .sidebar-item-search → Search panel.
 // - Suppression exists only while this plugin is loaded; if it crashes, Cmd-K reverts.
 //
 // UI is raw DOM appended to document.body — never touches editor content (DATA-LOSS
@@ -25,20 +33,25 @@ const CSS = `
   font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,sans-serif);}
 .scs-inputrow{display:flex;align-items:center;gap:8px;padding:12px 14px;
   border-bottom:1px solid rgba(255,255,255,.07);}
+.scs-searchtype{background:rgba(255,255,255,.1);border-radius:6px;padding:2px 8px;
+  font-size:13px;font-weight:600;white-space:nowrap;}
 .scs-crumb{background:rgba(255,255,255,.1);border-radius:6px;padding:2px 8px;
   font-size:12px;white-space:nowrap;}
 .scs-input{flex:1;background:transparent;border:none;outline:none;color:inherit;font-size:16px;}
 .scs-list{overflow-y:auto;flex:1;padding:6px;}
-.scs-head{font-size:11px;letter-spacing:.08em;text-transform:uppercase;opacity:.5;
-  padding:8px 10px 2px;}
+.scs-divider{height:1px;margin:5px 10px;background:rgba(255,255,255,.08);}
+.scs-static{padding:7px 10px;font-size:13px;opacity:.5;font-style:italic;}
 .scs-row{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;
   cursor:pointer;font-size:14px;}
 .scs-row.scs-sel{background:rgba(94,129,244,.25);}
 .scs-icon{width:20px;text-align:center;opacity:.8;flex:none;}
 .scs-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .scs-label mark{background:transparent;color:#8ab4ff;font-weight:600;}
+.scs-arrow{opacity:.5;flex:none;}
 .scs-sub{opacity:.45;font-size:12px;flex:none;max-width:35%;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap;}
+.scs-key{opacity:.55;font-size:12px;flex:none;border:1px solid rgba(255,255,255,.18);
+  border-radius:4px;padding:0 5px;}
 .scs-badge{font-size:10px;border:1px solid rgba(255,255,255,.25);border-radius:4px;
   padding:0 5px;opacity:.6;flex:none;}
 .scs-footer{padding:8px 14px;font-size:11px;opacity:.45;
@@ -46,14 +59,15 @@ const CSS = `
 .scs-empty{padding:18px;text-align:center;opacity:.5;font-size:13px;}
 `;
 
-const MAX_ITEM_ROWS = 50;
-const MAX_PAGE_ROWS = 20;
+const MAX_RESULTS = 40;
 const SEARCH_LIMIT = 100;
 const DEBOUNCE_MS = 120;
 // New records aren't immediately readable after createRecord (see memory:
 // thymer-sdk-write-read-model) — poll before navigating.
 const CREATE_POLL_MS = 50;
 const CREATE_POLL_TRIES = 160;
+// Synthetic-dispatch pacing for driving the native palette / search panel.
+const SYNTH_STEP_MS = 150;
 
 export class Plugin extends AppPlugin {
     onLoad() {
@@ -62,13 +76,13 @@ export class Plugin extends AppPlugin {
         this._level = { mode: "root" };
         this._rows = [];
         this._sel = 0;
-        this._searchRows = [];
+        this._searchRecs = [];
         this._searchToken = 0;
         this._debounce = null;
         this._prevFocus = null;
         this._cols = [];
         this._colRecords = new Map(); // colGuid -> PluginRecord[]
-        this._recCol = new Map();     // recordGuid -> collection name
+        this._recCol = new Map();     // recordGuid -> collection entry
 
         this._keyHandler = (e) => this._onGlobalKey(e);
         window.addEventListener("keydown", this._keyHandler, true);
@@ -122,28 +136,41 @@ export class Plugin extends AppPlugin {
     // ---------- data ----------
 
     async _refreshCollections() {
-        const cols = await this.data.getAllCollections();
+        const [cols, dyns] = await Promise.all([
+            this.data.getAllCollections(),
+            this.data.getAllDynamicCollections().catch(() => []),
+        ]);
         if (!cols || !cols.length) return; // transient-empty after reload; keep old cache
-        this._cols = cols.map((col) => {
+        const mapEntry = (col, isDynamic) => {
             const conf = col.getConfiguration() || {};
             return {
                 col,
                 guid: col.getGuid(),
                 name: col.getName() || "(unnamed)",
                 itemName: conf.item_name || "page",
-                icon: conf.icon || null,
+                icon: conf.icon || (isDynamic ? "ti-filter" : null),
                 hidden: conf.show_cmdpal_items === false,
                 views: (conf.views || []).filter((v) => v.shown !== false),
+                isJournal: !isDynamic && !!(col.isJournalPlugin && col.isJournalPlugin()),
+                isDynamic,
             };
-        });
-        // Record cache: powers sub-palette item lists and the collection label on
-        // page results. Built in the background; UI works without it.
+        };
+        this._cols = cols.map((c) => mapEntry(c, false))
+            .concat((dyns || []).map((c) => mapEntry(c, true)));
+        // Record cache: powers submenu item lists, fuzzy title matching at root, and
+        // the collection label on page results. Built in the background; UI works
+        // without it. Dynamic collections own no records — skip them.
         for (const entry of this._cols) {
+            if (entry.isDynamic) continue;
             entry.col.getAllRecords().then((records) => {
                 this._colRecords.set(entry.guid, records || []);
-                for (const r of records || []) this._recCol.set(r.guid, entry.name);
+                for (const r of records || []) this._recCol.set(r.guid, entry);
             }).catch(() => {});
         }
+    }
+
+    _creatable() {
+        return this._cols.filter((c) => !c.isJournal && !c.isDynamic);
     }
 
     // ---------- open/close ----------
@@ -152,7 +179,7 @@ export class Plugin extends AppPlugin {
         if (this._overlay) return;
         this._prevFocus = document.activeElement;
         this._level = { mode: "root" };
-        this._searchRows = [];
+        this._searchRecs = [];
         this._refreshCollections();
 
         const backdrop = document.createElement("div");
@@ -170,17 +197,26 @@ export class Plugin extends AppPlugin {
 
         const inputRow = document.createElement("div");
         inputRow.className = "scs-inputrow";
+        this._searchtype = document.createElement("span");
+        this._searchtype.className = "scs-searchtype";
+        this._searchtype.textContent = "@";
         this._crumb = document.createElement("span");
         this._crumb.className = "scs-crumb";
         this._crumb.style.display = "none";
         this._input = document.createElement("input");
         this._input.className = "scs-input";
-        this._input.placeholder = "Search collections, views, pages…";
+        this._input.placeholder = "Search a doc name, date, user, or command...";
         this._input.addEventListener("input", () => {
+            // ">" as first char = native command mode (Cmd-P's palette) — delegate.
+            if (this._level.mode === "root" && this._input.value.startsWith(">")) {
+                this._delegateCommandMode();
+                return;
+            }
             clearTimeout(this._debounce);
             this._debounce = setTimeout(() => this._render(), DEBOUNCE_MS);
         });
         this._input.addEventListener("keydown", (e) => this._onInputKey(e));
+        inputRow.appendChild(this._searchtype);
         inputRow.appendChild(this._crumb);
         inputRow.appendChild(this._input);
 
@@ -190,7 +226,7 @@ export class Plugin extends AppPlugin {
         const footer = document.createElement("div");
         footer.className = "scs-footer";
         footer.textContent =
-            "↑↓ navigate · ↵ open · ↵ on collection = submenu · esc back/close · ⌘⇧P native palette (settings)";
+            "↑↓ Navigate · ↵ Select · ⇧↵ Use other panel · Esc Back/Close · ⌘⇧P Native palette";
 
         palette.appendChild(inputRow);
         palette.appendChild(this._list);
@@ -213,6 +249,7 @@ export class Plugin extends AppPlugin {
         this._input = null;
         this._list = null;
         this._crumb = null;
+        this._searchtype = null;
         this._rows = [];
         if (this._prevFocus && this._prevFocus.isConnected) {
             try { this._prevFocus.focus(); } catch (e) { /* focus is best-effort */ }
@@ -231,7 +268,7 @@ export class Plugin extends AppPlugin {
         } else if (e.key === "Enter") {
             e.preventDefault();
             const row = this._rows[this._sel];
-            if (row) row.action();
+            if (row) row.action({ otherPanel: e.shiftKey });
         } else if (e.key === "Backspace" && !this._input.value && this._level.mode !== "root") {
             e.preventDefault();
             this._back();
@@ -251,23 +288,25 @@ export class Plugin extends AppPlugin {
         if (!this._overlay) return;
         const q = this._input.value.trim();
         const token = ++this._searchToken;
-        this._searchRows = [];
 
         if (this._level.mode === "root" && q) {
+            // Async title-match channel; merged into the ranked list when it lands.
             this.data.searchByQuery(q, SEARCH_LIMIT).then((res) => {
                 if (token !== this._searchToken || !this._overlay) return;
-                this._searchRows = this._rowsFromSearch(res);
+                this._searchRecs = (res && !res.error && res.records) || [];
                 this._renderList(q);
             }).catch(() => {});
+        } else {
+            this._searchRecs = [];
         }
         this._renderList(q);
     }
 
     _renderList(q) {
-        const sections =
-            this._level.mode === "root" ? this._rootSections(q)
-            : this._level.mode === "collection" ? this._collectionSections(q)
-            : this._createPickSections(q);
+        const entries =
+            this._level.mode === "root" ? (q ? this._rootQueryEntries(q) : this._rootEmptyEntries())
+            : this._level.mode === "collection" ? this._collectionEntries(q)
+            : this._createPickEntries(q);
 
         this._crumb.style.display = this._level.mode === "root" ? "none" : "";
         this._crumb.textContent =
@@ -276,22 +315,29 @@ export class Plugin extends AppPlugin {
 
         this._list.textContent = "";
         this._rows = [];
-        for (const section of sections) {
-            if (!section.rows.length) continue;
-            if (section.title) {
-                const head = document.createElement("div");
-                head.className = "scs-head";
-                head.textContent = section.title;
-                this._list.appendChild(head);
+        let defaultSel = 0;
+        for (const entry of entries) {
+            if (entry.divider) {
+                const div = document.createElement("div");
+                div.className = "scs-divider";
+                this._list.appendChild(div);
+                continue;
             }
-            for (const row of section.rows) {
-                row.el = this._rowEl(row, q);
-                const index = this._rows.length;
-                row.el.addEventListener("mouseenter", () => this._select(index));
-                row.el.addEventListener("click", () => row.action());
-                this._list.appendChild(row.el);
-                this._rows.push(row);
+            if (entry.static) {
+                const div = document.createElement("div");
+                div.className = "scs-static";
+                div.textContent = entry.static;
+                this._list.appendChild(div);
+                continue;
             }
+            const row = entry;
+            row.el = this._rowEl(row, q);
+            const index = this._rows.length;
+            if (row.defaultSel) defaultSel = index;
+            row.el.addEventListener("mouseenter", () => this._select(index));
+            row.el.addEventListener("click", (e) => row.action({ otherPanel: e.shiftKey }));
+            this._list.appendChild(row.el);
+            this._rows.push(row);
         }
         if (!this._rows.length) {
             const empty = document.createElement("div");
@@ -299,169 +345,303 @@ export class Plugin extends AppPlugin {
             empty.textContent = q ? "No results" : "Loading…";
             this._list.appendChild(empty);
         }
-        this._sel = 0;
-        this._select(0);
+        this._select(Math.min(defaultSel, Math.max(0, this._rows.length - 1)));
     }
 
     _rowEl(row, q) {
         const el = document.createElement("div");
         el.className = "scs-row";
-        const badge = row.badge ? `<span class="scs-badge">${esc(row.badge)}</span>` : "";
-        const sub = row.sub ? `<span class="scs-sub">${esc(row.sub)}</span>` : "";
-        el.innerHTML =
-            `<span class="scs-icon">${iconHTML(row.icon)}</span>` +
-            `<span class="scs-label">${row.noHighlight ? esc(row.label) : highlight(row.label, q)}</span>` +
-            badge + sub;
+        const label = row.indices
+            ? highlightIndices(row.label, row.indices)
+            : (row.noHighlight ? esc(row.label) : highlight(row.label, q));
+        const parts = [
+            `<span class="scs-icon">${iconHTML(row.icon)}</span>`,
+            `<span class="scs-label">${label}</span>`,
+        ];
+        if (row.arrow) parts.push(`<span class="scs-arrow">→</span>`);
+        if (row.badge) parts.push(`<span class="scs-badge">${esc(row.badge)}</span>`);
+        if (row.sub) parts.push(`<span class="scs-sub">${esc(row.sub)}</span>`);
+        if (row.shortcut) parts.push(`<span class="scs-key">${esc(row.shortcut)}</span>`);
+        el.innerHTML = parts.join("");
         return el;
     }
 
-    // ---------- sections per level ----------
+    // ---------- root: empty query (native layout) ----------
 
-    _rootSections(q) {
-        const match = (s) => !q || (s || "").toLowerCase().includes(q.toLowerCase());
-        const colRows = this._cols.filter((c) => match(c.name)).map((c) => ({
-            label: c.name,
-            icon: c.icon || "ti-database",
-            badge: c.hidden ? "hidden" : null,
-            action: () => this._enterCollection(c),
-        }));
+    _rootEmptyEntries() {
+        const entries = [];
+        entries.push({
+            label: "Press > to filter commands only...",
+            icon: "ti-chevron-right",
+            shortcut: "⌘P",
+            noHighlight: true,
+            action: () => this._delegateCommandMode(),
+        });
+        entries.push({ divider: true });
+        for (const c of this._cols) {
+            entries.push({
+                label: c.name,
+                icon: c.icon || "ti-database",
+                arrow: true,
+                badge: c.hidden ? "hidden" : null,
+                noHighlight: true,
+                action: () => this._enterCollection(c),
+            });
+        }
+        entries.push({ divider: true });
+        if (this._cols.some((c) => c.isJournal)) {
+            entries.push({
+                label: "Open Today's Journal",
+                icon: "ti-notebook",
+                shortcut: "⌘J",
+                noHighlight: true,
+                action: (opts) => this._openJournal(null, opts),
+            });
+        }
+        return entries;
+    }
 
-        const viewRows = [];
-        if (q) {
-            for (const c of this._cols) {
-                for (const v of c.views) {
-                    if (!match(v.label)) continue;
-                    viewRows.push({
-                        label: v.label,
-                        icon: v.icon || "ti-layout-list",
-                        sub: c.name,
-                        action: () => this._openView(c.guid, v.id),
-                    });
-                }
+    // ---------- root: query (single ranked list, native parity) ----------
+
+    _rootQueryEntries(q) {
+        const scored = [];
+        const add = (m, row) => { if (m) scored.push(Object.assign(row, { score: m.score + (row.boost || 0), indices: m.indices })); };
+
+        for (const c of this._cols) {
+            const nameM = fuzzyMatch(q, c.name);
+            if (nameM) {
+                // Collection row (enters submenu) + separate Open row, like native.
+                add(nameM, {
+                    label: c.name, icon: c.icon || "ti-database", arrow: true,
+                    badge: c.hidden ? "hidden" : null, boost: 4,
+                    action: () => this._enterCollection(c),
+                });
+                const openLabel = `Open Collection '${c.name}'`;
+                add(fuzzyMatch(q, openLabel) || nameM && { score: nameM.score, indices: null }, {
+                    label: openLabel, icon: c.icon || "ti-database", boost: 2,
+                    action: (opts) => this._openView(c.guid, null, opts),
+                });
             }
+            for (const v of c.views) {
+                add(fuzzyMatch(q, v.label), {
+                    label: v.label, icon: v.icon || "ti-layout-list", sub: c.name,
+                    action: (opts) => this._openView(c.guid, v.id, opts),
+                });
+            }
+            if (!c.isJournal && !c.isDynamic) {
+                // Label carries both collection name and item_name, so fuzzy matches either.
+                add(fuzzyMatch(q, `${c.name}: New ${c.itemName}`), {
+                    label: `${c.name}: New ${c.itemName}`, icon: "ti-plus",
+                    action: () => this._createRecord(c, null),
+                });
+            }
+            add(fuzzyMatch(q, `${c.name}: Collection Settings...`), {
+                label: `${c.name}: Collection Settings...`, icon: "ti-settings", boost: -2,
+                action: () => this._openCollectionSettings(c.name),
+            });
         }
 
-        const actionRows = [];
-        if (q) {
-            actionRows.push({
-                label: `New page “${q}”…`,
-                icon: "ti-plus",
-                noHighlight: true,
+        // Pages: fuzzy over the record-name cache + async searchByQuery title channel.
+        const seen = new Set();
+        for (const [guid, records] of this._colRecords) {
+            const colEntry = this._cols.find((c) => c.guid === guid);
+            for (const r of records) {
+                const m = fuzzyMatch(q, r.getName() || "");
+                if (!m) continue;
+                seen.add(r.guid);
+                add(m, this._pageRow(r, colEntry, 6));
+            }
+        }
+        for (const r of this._searchRecs) {
+            if (seen.has(r.guid)) continue;
+            const colEntry = this._recCol.get(r.guid) || null;
+            const m = fuzzyMatch(q, r.getName() || "") || { score: 1, indices: null };
+            add(m, this._pageRow(r, colEntry, 6));
+        }
+
+        scored.sort((a, b) => b.score - a.score);
+        const entries = scored.slice(0, MAX_RESULTS);
+
+        // Date query → journal jump row on top (native shows calendar + jump row).
+        const dt = parseDate(q);
+        if (dt) {
+            entries.unshift({
+                label: fmtDate(dt), icon: "ti-calendar-event", noHighlight: true,
+                action: (opts) => this._openJournal(dt, opts),
+            });
+        }
+
+        // No-match: create actions, like native.
+        if (!scored.length) {
+            const def = this._creatable()[0];
+            if (def) {
+                entries.push({
+                    label: `Create '${q}' in ${def.name}`, icon: "ti-plus", noHighlight: true,
+                    action: () => this._createRecord(def, q),
+                });
+            }
+            entries.push({
+                label: `Create '${q}' in…`, icon: "ti-plus", noHighlight: true,
                 action: () => { this._level = { mode: "create-pick", name: q }; this._input.value = ""; this._render(); },
             });
         }
-        actionRows.push({
-            label: "Open native palette (settings, commands…)",
-            icon: "ti-command",
-            noHighlight: true,
-            action: () => this._openNativePalette(),
+
+        // Always last, like native.
+        entries.push({
+            label: `Search for '${q}' in all text`, icon: "ti-search", noHighlight: true,
+            action: () => this._openSearchPanel(q),
+        });
+        return entries;
+    }
+
+    _pageRow(record, colEntry, boost) {
+        return {
+            label: record.getName() || "(untitled)",
+            icon: safeIcon(record) || (colEntry && colEntry.icon) || "ti-file",
+            sub: colEntry ? colEntry.name : null,
+            badge: colEntry && colEntry.hidden ? "hidden" : null,
+            boost,
+            action: (opts) => this._openRecord(record.guid, opts),
+        };
+    }
+
+    // ---------- collection submenu (native ordering) ----------
+
+    _collectionEntries(q) {
+        const entry = this._level.entry;
+        const entries = [];
+        const filter = (rows) => q ? rows.filter((r) => {
+            const m = fuzzyMatch(q, r.label);
+            if (m) { r.indices = m.indices; r.score = m.score; }
+            return !!m;
+        }) : rows;
+
+        entries.push({
+            label: "← Back", icon: "ti-arrow-left", noHighlight: true,
+            action: () => this._back(),
         });
 
-        const sections = [{ title: "Collections", rows: colRows }];
-        if (viewRows.length) sections.push({ title: "Views", rows: viewRows });
-        for (const s of this._searchRows) sections.push(s);
-        sections.push({ title: "Actions", rows: actionRows });
-        return sections;
-    }
-
-    _rowsFromSearch(res) {
-        if (!res || res.error) return [];
-        // Native Cmd-K parity: title matches only (res.records). The lines channel
-        // (body-text matches) exists but is deliberately unused — dropped by design
-        // decision 2026-07-05.
-        const pageRows = (res.records || []).slice(0, MAX_PAGE_ROWS).map((r) => ({
-            label: r.getName() || "(untitled)",
-            icon: safeIcon(r),
-            sub: this._recCol.get(r.guid) || null,
-            action: () => this._openRecord(r.guid),
-        }));
-        return pageRows.length ? [{ title: "Pages", rows: pageRows }] : [];
-    }
-
-    _collectionSections(q) {
-        const entry = this._level.entry;
-        const match = (s) => !q || (s || "").toLowerCase().includes(q.toLowerCase());
-
-        const actionRows = [];
-        if (match("open " + entry.name)) {
-            actionRows.push({
-                label: "Open " + entry.name,
-                icon: entry.icon || "ti-database",
-                noHighlight: true,
-                action: () => this._openView(entry.guid, null),
+        const actions = [];
+        actions.push({
+            label: `Open Collection '${entry.name}'`,
+            icon: entry.icon || "ti-database",
+            defaultSel: true,
+            action: (opts) => this._openView(entry.guid, null, opts),
+        });
+        if (!entry.isJournal && !entry.isDynamic) {
+            actions.push({
+                label: `${entry.name}: New ${entry.itemName}`,
+                icon: "ti-plus",
+                action: () => this._createRecord(entry, q || null),
             });
         }
-        actionRows.push({
-            label: q ? `New ${entry.itemName} “${q}” in ${entry.name}`
-                     : `New ${entry.itemName} in ${entry.name}`,
-            icon: "ti-plus",
-            noHighlight: true,
-            action: () => this._createRecord(entry, q || null),
+        for (const v of entry.views) {
+            actions.push({
+                label: v.label, icon: v.icon || "ti-layout-list",
+                action: (opts) => this._openView(entry.guid, v.id, opts),
+            });
+        }
+        actions.push({
+            label: `${entry.name}: Collection Settings...`, icon: "ti-settings",
+            action: () => this._openCollectionSettings(entry.name),
         });
+        entries.push(...filter(actions));
 
-        const viewRows = entry.views.filter((v) => match(v.label)).map((v) => ({
-            label: v.label,
-            icon: v.icon || "ti-layout-list",
-            action: () => this._openView(entry.guid, v.id),
-        }));
+        if (entry.isJournal) {
+            // Native journal submenu: date hint, no New row, no items.
+            const dt = parseDate(q);
+            if (dt) {
+                entries.splice(1, 0, {
+                    label: fmtDate(dt), icon: "ti-calendar-event", noHighlight: true,
+                    action: (opts) => this._openJournal(dt, opts),
+                });
+            } else if (!q) {
+                entries.push({ static: "Try: monday, 7 days, aug 1" });
+            }
+            return this._fixSubmenuSel(entries, q);
+        }
+        if (entry.isDynamic) return this._fixSubmenuSel(entries, q); // no owned items
 
         const records = this._colRecords.get(entry.guid) || [];
-        const itemRows = records
-            .filter((r) => match(r.getName()))
-            .slice(0, MAX_ITEM_ROWS)
-            .map((r) => ({
-                label: r.getName() || "(untitled)",
-                icon: safeIcon(r),
-                action: () => this._openRecord(r.guid),
-            }));
-
-        return [
-            { title: null, rows: actionRows },
-            { title: "Views", rows: viewRows },
-            { title: "Items", rows: itemRows },
-        ];
+        const itemRows = filter(records.map((r) => {
+            const row = this._pageRow(r, entry, 0);
+            row.sub = null; // collection label is redundant inside its own submenu
+            return row;
+        }));
+        if (q) itemRows.sort((a, b) => b.score - a.score);
+        if (itemRows.length) {
+            entries.push({ divider: true });
+            entries.push(...itemRows);
+        }
+        return this._fixSubmenuSel(entries, q);
     }
 
-    _createPickSections(q) {
-        const match = (s) => !q || (s || "").toLowerCase().includes(q.toLowerCase());
+    // When filtering a submenu, select the first match — never the "← Back" row.
+    _fixSubmenuSel(entries, q) {
+        if (q) {
+            for (const en of entries) en.defaultSel = false;
+            const first = entries.find((en) => en.action && en.label !== "← Back");
+            if (first) first.defaultSel = true;
+        }
+        return entries;
+    }
+
+    // ---------- create-picker submenu ----------
+
+    _createPickEntries(q) {
         const name = this._level.name;
-        return [{
-            title: `Create “${name}” in…`,
-            rows: this._cols.filter((c) => match(c.name)).map((c) => ({
+        const entries = [{
+            label: "← Back", icon: "ti-arrow-left", noHighlight: true,
+            action: () => this._back(),
+        }];
+        // Native create-picker: only creatable collections (no Journal/Tags/dynamic).
+        for (const c of this._creatable()) {
+            const m = fuzzyMatch(q, c.name);
+            if (q && !m) continue;
+            entries.push({
                 label: c.name,
                 icon: c.icon || "ti-database",
                 badge: c.hidden ? "hidden" : null,
+                indices: m ? m.indices : null,
+                defaultSel: entries.length === 1,
                 action: () => this._createRecord(c, name),
-            })),
-        }];
+            });
+        }
+        return entries;
     }
 
     _enterCollection(entry) {
         this._level = { mode: "collection", entry };
         this._input.value = "";
-        // Refresh this collection's items so the sub-palette isn't stale.
-        entry.col.getAllRecords().then((records) => {
-            this._colRecords.set(entry.guid, records || []);
-            for (const r of records || []) this._recCol.set(r.guid, entry.name);
-            if (this._overlay && this._level.mode === "collection" && this._level.entry === entry) {
-                this._render();
-            }
-        }).catch(() => {});
+        if (!entry.isDynamic) {
+            // Refresh this collection's items so the sub-palette isn't stale.
+            entry.col.getAllRecords().then((records) => {
+                this._colRecords.set(entry.guid, records || []);
+                for (const r of records || []) this._recCol.set(r.guid, entry);
+                if (this._overlay && this._level.mode === "collection" && this._level.entry === entry) {
+                    this._render();
+                }
+            }).catch(() => {});
+        }
         this._render();
     }
 
     // ---------- actions ----------
 
-    async _targetPanel() {
+    async _targetPanel(otherPanel) {
         const panels = (this.ui.getPanels() || []).filter((p) => !p.isSidebar());
-        let panel = panels.find((p) => p.isActive()) || panels[0];
-        if (!panel) panel = await this.ui.createPanel();
-        return panel;
+        let active = panels.find((p) => p.isActive()) || panels[0];
+        if (!active) return await this.ui.createPanel();
+        if (!otherPanel) return active;
+        // "Use other panel, if openable" — reuse an existing second panel, else split.
+        const activeId = active.getId ? active.getId() : null;
+        const other = panels.find((p) => (p.getId ? p.getId() : null) !== activeId);
+        return other || await this.ui.createPanel({ afterPanel: active });
     }
 
-    async _openRecord(guid) {
+    async _openRecord(guid, opts) {
         this._close();
-        const panel = await this._targetPanel();
+        const panel = await this._targetPanel(opts && opts.otherPanel);
         if (!panel) return;
         panel.navigateTo({
             type: "edit_panel", rootId: guid, subId: null,
@@ -470,14 +650,28 @@ export class Plugin extends AppPlugin {
         this.ui.setActivePanel(panel);
     }
 
-    async _openView(colGuid, viewId) {
+    async _openView(colGuid, viewId, opts) {
         this._close();
-        const panel = await this._targetPanel();
+        const panel = await this._targetPanel(opts && opts.otherPanel);
         if (!panel) return;
         panel.navigateTo({
             type: "overview", rootId: colGuid, subId: viewId || null,
             workspaceGuid: this.getWorkspaceGuid(),
         });
+        this.ui.setActivePanel(panel);
+    }
+
+    async _openJournal(dt, opts) {
+        this._close();
+        const user = (this.data.getActiveUsers() || [])[0];
+        if (!user) return;
+        const panel = await this._targetPanel(opts && opts.otherPanel);
+        if (!panel) return;
+        const ok = panel.navigateToJournal(user, dt || undefined);
+        if (!ok) {
+            this.ui.addToaster({ title: "Sidecar Search", message: "No journal available.", dismissible: true });
+            return;
+        }
         this.ui.setActivePanel(panel);
     }
 
@@ -497,14 +691,62 @@ export class Plugin extends AppPlugin {
         this._openRecord(guid);
     }
 
-    _openNativePalette() {
+    // ---------- synthetic-DOM routes (native palette / search panel) ----------
+
+    _delegateCommandMode() {
+        // Native ⌘P opens the palette already in ">" command mode.
         this._close();
         setTimeout(() => {
-            const synth = new KeyboardEvent("keydown", {
-                key: "k", code: "KeyK", keyCode: 75, which: 75,
+            (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", {
+                key: "p", code: "KeyP", keyCode: 80, which: 80,
                 metaKey: true, bubbles: true, cancelable: true,
-            });
-            (document.activeElement || document.body).dispatchEvent(synth);
+            }));
+        }, 50);
+    }
+
+    _openCollectionSettings(name) {
+        // No SDK route to the Settings dialog — drive the native palette invisibly:
+        // ⌘⇧P, type "<name> settings", Enter (live-verified 2026-07-05; brief flash OK).
+        this._close();
+        setTimeout(() => {
+            (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", {
+                key: "p", code: "KeyP", keyCode: 80, which: 80,
+                metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
+            }));
+            setTimeout(() => {
+                const input = document.querySelector(".cmdpal--input");
+                if (!input) return;
+                input.value = `${name} settings`;
+                input.dispatchEvent(new Event("input", { bubbles: true }));
+                setTimeout(() => {
+                    input.dispatchEvent(new KeyboardEvent("keydown", {
+                        key: "Enter", code: "Enter", keyCode: 13, which: 13,
+                        bubbles: true, cancelable: true,
+                    }));
+                }, SYNTH_STEP_MS);
+            }, SYNTH_STEP_MS);
+        }, 50);
+    }
+
+    _openSearchPanel(query) {
+        // Native Search panel via sidebar toggle (event="onToggleSearch").
+        this._close();
+        setTimeout(() => {
+            const el = document.querySelector(".sidebar-item-search");
+            if (!el) {
+                this.ui.addToaster({ title: "Sidecar Search", message: "Search panel not found.", dismissible: true });
+                return;
+            }
+            el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+            if (!query) return;
+            // Prefill is best-effort (untested route): the panel focuses its input.
+            setTimeout(() => {
+                const ae = document.activeElement;
+                if (ae && ae.tagName === "INPUT" && !ae.classList.contains("scs-input")) {
+                    ae.value = query;
+                    ae.dispatchEvent(new Event("input", { bubbles: true }));
+                }
+            }, SYNTH_STEP_MS * 2);
         }, 50);
     }
 }
@@ -517,13 +759,47 @@ function esc(s) {
         .replace(/"/g, "&quot;");
 }
 
+// Fuzzy subsequence match (native-palette style): every query char must appear in
+// order; scores favor consecutive runs, word starts, tight/early matches.
+function fuzzyMatch(query, text) {
+    const t = String(text || "");
+    const tl = t.toLowerCase();
+    const q = String(query || "").toLowerCase();
+    if (!q) return { score: 0, indices: [] };
+    const indices = [];
+    let score = 0;
+    let pos = 0;
+    let prev = -2;
+    for (const ch of q) {
+        const found = tl.indexOf(ch, pos);
+        if (found < 0) {
+            if (ch === " ") continue; // spaces in the query are optional
+            return null;
+        }
+        if (found === prev + 1) score += 8;
+        if (found === 0 || /[\s\-_:'".(/]/.test(t[found - 1])) score += 6;
+        score -= Math.min(found - pos, 12) * 0.5;
+        indices.push(found);
+        prev = found;
+        pos = found + 1;
+    }
+    score -= tl.length * 0.05;
+    return { score, indices };
+}
+
+function highlightIndices(label, indices) {
+    const set = new Set(indices || []);
+    let out = "";
+    for (let i = 0; i < label.length; i++) {
+        const c = esc(label[i]);
+        out += set.has(i) ? `<mark>${c}</mark>` : c;
+    }
+    return out;
+}
+
 function highlight(label, q) {
-    const safe = esc(label);
-    if (!q) return safe;
-    const idx = safe.toLowerCase().indexOf(esc(q).toLowerCase());
-    if (idx < 0) return safe;
-    const end = idx + esc(q).length;
-    return safe.slice(0, idx) + "<mark>" + safe.slice(idx, end) + "</mark>" + safe.slice(end);
+    const m = fuzzyMatch(q, label);
+    return m ? highlightIndices(label, m.indices) : esc(label);
 }
 
 function iconHTML(icon) {
@@ -536,3 +812,18 @@ function safeIcon(record) {
     try { return record.getIcon ? record.getIcon(false) : null; } catch (e) { return null; }
 }
 
+function parseDate(q) {
+    if (!q || q.length < 2 || /^\d+$/.test(q)) return null; // bare numbers: too noisy
+    try {
+        return (typeof DateTime !== "undefined" && DateTime.parseDateTimeString)
+            ? DateTime.parseDateTimeString(q) : null;
+    } catch (e) { return null; }
+}
+
+function fmtDate(dt) {
+    try {
+        return dt.toDate().toLocaleDateString("en-US", {
+            weekday: "short", month: "short", day: "numeric",
+        });
+    } catch (e) { return "Open journal for date"; }
+}

@@ -1,6 +1,52 @@
 # sidecar-search
 
-**Status (2026-07-05): v1 working in BOTH the web app and the desktop app.** Verified:
+**Status (2026-07-05): v2 implemented AND live-verified in the web app (CDP-driven,
+hot-reload push).** Verified live: root empty layout, fuzzy ranked mixed list
+("test" reproduces the spec's observed row mix), date jump rows ("monday" → Mon Jul 6,
+"7 days" → Sun Jul 12, "aug 1" in journal submenu), submenu ordering + full item list +
+filter-with-selection-on-first-match, Backspace-to-root, Esc semantics, Enter-open,
+Shift+Enter → new split panel, `>` → native palette in command mode, Settings row →
+real Settings dialog (invisible ⌘⇧P drive), Search-for row → Search panel WITH query
+prefill (the spec's untested prefill route works: the panel focuses its input, and
+value + input event executes the search). NOT persisted in-app yet — hot-reload pushes
+are ephemeral; stop hot reload and save the plugin in-app to keep v2.
+
+Live-test notes: the `hidden` badge currently appears on "New Dynamic Collection", not
+Examples — the `show_cmdpal_items:false` flag moved since the spec study (data, not a
+bug). Native's "test" → "Development history" match (not a title subsequence) is NOT
+reproduced — native apparently matches beyond title subsequences; ours is title-only.
+
+Implements the spec's full gap list:
+
+1. Fuzzy subsequence matching, one ranked mixed list when querying (fixed sections
+   dropped; native-observed row types: collection `→` + `Open Collection 'X'`, views,
+   pages, `X: New <item>` matching name OR item_name, `X: Collection Settings...`,
+   `Search for 'q' in all text` always last, create rows on no-match).
+2. Root empty query = native layout: `Press > to filter commands only... ⌘P` hint row,
+   divider, collections (regular + dynamic; hidden-flagged badged), divider,
+   `Open Today's Journal` (⌘J).
+3. Submenu: `← Back` row, native ordering (Open → New → views → Settings → divider →
+   full item list), `Open Collection 'X'` as default selection; journal submenu = date
+   hint + Open + Settings (no New/items, date query → jump row); dynamic submenu = no
+   New/items; create-picker excludes journal + dynamic collections.
+4. Chrome: `@` mode indicator, native placeholder, native-style footer.
+5. Shift+Enter (and shift-click) → other panel (`createPanel({afterPanel})` when
+   there's only one; panels compared by `getId()`).
+6. Date queries (`monday`, `aug 1`, `7 days`) via `DateTime.parseDateTimeString` →
+   `Mon Jul 6` jump row → `panel.navigateToJournal(user, dt)`. Calendar widget skipped
+   (optional per spec). Bare-number queries excluded to avoid noise.
+7. Hidden-items extension KEPT: flagged collections' items ranked + badged `hidden`.
+8. Synthetic-DOM routes (all per spec, live-verified there): `>` as first char or hint
+   row → ⌘P (native command mode); `Search for 'q' in all text` → click
+   `.sidebar-item-search` + best-effort query prefill (prefill untested); Settings rows
+   → invisible native-palette drive (⌘⇧P → type `<name> settings` → Enter; brief flash
+   possible; assumes the settings row ranks first for that query, as observed).
+
+Not replicated: Tags pseudo-collection (no SDK hashtag enumeration; tag rows would
+need the Search-panel route anyway) and the inline calendar widget. Exact native
+ranking weights are unobservable — ours favors consecutive runs/word starts.
+
+**v1 status (superseded): working in BOTH the web app and the desktop app.** Verified:
 Cmd-K takeover (desktop too — no menu-accelerator conflict), root palette (collections
 incl. hidden badge, views, Pages/Content search sections, create action), sub-palette
 (open/new/views/items), Backspace-back, Esc, open-record, open-view (`navigateTo`
