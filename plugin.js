@@ -31,47 +31,48 @@
 // `export` works only in the esbuild dev/build loop; paste dist/plugin.js instead.
 
 // Chrome cloned pixel-for-pixel from the native Cmd-K palette (.cmdpal--dialog),
-// computed-styles extracted over CDP 2026-07-05. Values are the thymer-dark theme's
-// (the app hardcodes per-theme display-p3 colors — no CSS vars to inherit — so this
-// matches the dark theme exactly; a light theme would need the light palette's values).
+// computed-styles extracted over CDP 2026-07-05. Theme-adaptive: the colors are CSS
+// vars set at open time by _readThemeColors() (which measures a hidden probe built from
+// the native class names, so it picks up whatever the active theme paints them). The
+// literals below are thymer-dark fallbacks used if the probe can't read the app's CSS.
 // Native uses NO backdrop dim (doc stays fully visible); the backdrop here is a
 // transparent click-catcher only.
 const CSS = `
 .scs-backdrop{position:fixed;inset:0;z-index:99999;background:transparent;
   display:flex;align-items:flex-start;justify-content:center;padding-top:100px;}
 .scs-palette{width:500px;max-width:92vw;max-height:62vh;display:flex;flex-direction:column;
-  background:color(display-p3 0.129 0.129 0.149);color:color(display-p3 0.769 0.769 0.769);
-  border:1px solid rgba(255,255,255,.1);border-radius:5px;overflow:hidden;font-weight:300;
+  background:var(--scs-bg,color(display-p3 0.129 0.129 0.149));
+  color:var(--scs-fg,color(display-p3 0.769 0.769 0.769));
+  border:1px solid var(--scs-border,rgba(255,255,255,.1));border-radius:5px;
+  overflow:hidden;font-weight:300;
   box-shadow:rgba(0,0,0,.14) 0 12px 17px 2px,rgba(0,0,0,.12) 0 5px 22px 4px,rgba(0,0,0,.2) 0 7px 8px -4px;
   font-family:var(--font-sans,ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace);}
 .scs-inputrow{display:flex;align-items:center;gap:0;padding:5px;}
 .scs-searchtype{padding:5px 0 5px 5px;font-size:14px;white-space:nowrap;}
-.scs-crumb{padding:5px 0 5px 5px;font-size:14px;white-space:nowrap;
-  color:color(display-p3 0.541 0.541 0.541);}
+.scs-crumb{padding:5px 0 5px 5px;font-size:14px;white-space:nowrap;opacity:.6;}
 .scs-input{flex:1;background:transparent;border:none;outline:none;color:inherit;
   font:inherit;font-size:15px;padding:10px;}
-.scs-input::placeholder{color:color(display-p3 0.541 0.541 0.541);}
+.scs-input::placeholder{color:inherit;opacity:.5;}
 .scs-list{overflow-y:auto;flex:1;padding:0 0 5px;}
-.scs-divider{height:0;margin:6px 10px 6px 5px;border-top:1.5px solid rgba(255,255,255,.1);opacity:.3;}
-.scs-static{padding:5px 10px 5px 15px;font-size:14px;
-  color:color(display-p3 0.541 0.541 0.541);}
+.scs-divider{height:0;margin:6px 10px 6px 5px;
+  border-top:1.5px solid var(--scs-border,rgba(255,255,255,.1));opacity:.3;}
+.scs-static{padding:5px 10px 5px 15px;font-size:14px;opacity:.6;}
 .scs-row{display:flex;align-items:center;gap:8px;padding:5px 10px;border-radius:3px;
   margin:0 5px;width:calc(100% - 10px);box-sizing:border-box;cursor:pointer;font-size:14px;}
-.scs-row.scs-sel{background:color(display-p3 0.267 0.514 0.482);color:color(display-p3 0.929 0.929 0.929);}
-.scs-icon{flex:none;min-width:16px;text-align:center;color:color(display-p3 0.929 0.929 0.929);}
+.scs-row.scs-sel{background:var(--scs-sel-bg,color(display-p3 0.267 0.514 0.482));
+  color:var(--scs-fg-bright,color(display-p3 0.929 0.929 0.929));}
+.scs-icon{flex:none;min-width:16px;text-align:center;
+  color:var(--scs-fg-bright,color(display-p3 0.929 0.929 0.929));}
 .scs-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.scs-label mark{background:transparent;color:color(display-p3 0.929 0.929 0.929);font-weight:400;}
-.scs-arrow{flex:none;color:color(display-p3 0.929 0.929 0.929);}
+.scs-label mark{background:transparent;color:var(--scs-hilite,#fff);
+  font-weight:var(--scs-hilite-weight,700);}
+.scs-arrow{flex:none;color:var(--scs-fg-bright,color(display-p3 0.929 0.929 0.929));}
 .scs-sub{flex:none;font-size:14px;max-width:38%;overflow:hidden;text-overflow:ellipsis;
-  white-space:nowrap;color:color(display-p3 0.541 0.541 0.541);}
-.scs-key{flex:none;font-size:14px;color:color(display-p3 0.541 0.541 0.541);}
-.scs-badge{flex:none;font-size:10px;text-transform:uppercase;letter-spacing:.04em;
-  border:1px solid rgba(255,255,255,.2);border-radius:3px;padding:0 5px;
-  color:color(display-p3 0.541 0.541 0.541);}
-.scs-footer{padding:10px;font-size:11px;color:color(display-p3 0.769 0.769 0.769);
+  white-space:nowrap;opacity:.6;}
+.scs-key{flex:none;font-size:14px;opacity:.6;}
+.scs-footer{padding:10px;font-size:11px;color:var(--scs-fg,color(display-p3 0.769 0.769 0.769));
   border-top:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between;}
-.scs-empty{padding:18px;text-align:center;font-size:14px;
-  color:color(display-p3 0.541 0.541 0.541);}
+.scs-empty{padding:18px;text-align:center;font-size:14px;opacity:.6;}
 `;
 
 const MAX_RESULTS = 40;
@@ -248,8 +249,52 @@ export class Plugin extends AppPlugin {
         document.body.appendChild(backdrop);
         this._overlay = backdrop;
 
+        // Re-read the active theme's palette colors each open so the clone tracks
+        // theme switches (they're set as CSS vars; CSS carries dark fallbacks).
+        const colors = this._readThemeColors();
+        for (const name in colors) backdrop.style.setProperty(name, colors[name]);
+
         this._render();
         this._input.focus();
+    }
+
+    // Measure the native palette's theme colors WITHOUT opening it (no flash): build a
+    // hidden probe from the native class names and let the app's own CSS paint it, then
+    // read the computed values. Returns only the vars it could resolve; the rest fall
+    // back to the dark literals baked into CSS.
+    _readThemeColors() {
+        const box = document.createElement("div");
+        box.style.cssText = "position:fixed;left:-9999px;top:0;visibility:hidden;pointer-events:none;";
+        box.innerHTML =
+            '<div class="cmdpal--dialog"><div class="cmdpal--ac-container">' +
+            '<div class="autocomplete--option autocomplete--option-selected">' +
+            '<span class="autocomplete--option-label"><span class="autocomplete--hilite">x</span></span>' +
+            "</div></div></div>";
+        document.body.appendChild(box);
+        const out = {};
+        try {
+            const cs = (sel) => { const el = box.querySelector(sel); return el && getComputedStyle(el); };
+            const isColor = (v) => v && v !== "rgba(0, 0, 0, 0)" && v !== "transparent";
+            const put = (name, v) => { if (isColor(v)) out[name] = v; };
+            const dialog = cs(".cmdpal--dialog");
+            const sel = cs(".autocomplete--option-selected");
+            const hil = cs(".autocomplete--hilite");
+            if (dialog) {
+                put("--scs-bg", dialog.backgroundColor);
+                put("--scs-fg", dialog.color);
+                put("--scs-border", dialog.borderTopColor);
+            }
+            if (sel) {
+                put("--scs-sel-bg", sel.backgroundColor);
+                put("--scs-fg-bright", sel.color);
+            }
+            if (hil) {
+                put("--scs-hilite", hil.color);
+                if (hil.fontWeight) out["--scs-hilite-weight"] = hil.fontWeight;
+            }
+        } catch (e) { /* fall back to CSS literals */ }
+        box.remove();
+        return out;
     }
 
     _close() {
@@ -372,7 +417,6 @@ export class Plugin extends AppPlugin {
             `<span class="scs-label">${label}</span>`,
         ];
         if (row.arrow) parts.push(`<span class="scs-arrow">→</span>`);
-        if (row.badge) parts.push(`<span class="scs-badge">${esc(row.badge)}</span>`);
         if (row.sub) parts.push(`<span class="scs-sub">${esc(row.sub)}</span>`);
         if (row.shortcut) parts.push(`<span class="scs-key">${esc(row.shortcut)}</span>`);
         el.innerHTML = parts.join("");
@@ -396,7 +440,6 @@ export class Plugin extends AppPlugin {
                 label: c.name,
                 icon: c.icon || "ti-database",
                 arrow: true,
-                badge: c.hidden ? "hidden" : null,
                 noHighlight: true,
                 action: () => this._enterCollection(c),
             });
@@ -425,8 +468,7 @@ export class Plugin extends AppPlugin {
             if (nameM) {
                 // Collection row (enters submenu) + separate Open row, like native.
                 add(nameM, {
-                    label: c.name, icon: c.icon || "ti-database", arrow: true,
-                    badge: c.hidden ? "hidden" : null, boost: 4,
+                    label: c.name, icon: c.icon || "ti-database", arrow: true, boost: 4,
                     action: () => this._enterCollection(c),
                 });
                 const openLabel = `Open Collection '${c.name}'`;
@@ -512,7 +554,6 @@ export class Plugin extends AppPlugin {
             label: record.getName() || "(untitled)",
             icon: safeIcon(record) || (colEntry && colEntry.icon) || "ti-file",
             sub: colEntry ? colEntry.name : null,
-            badge: colEntry && colEntry.hidden ? "hidden" : null,
             boost,
             action: (opts) => this._openRecord(record.guid, opts),
         };
@@ -614,7 +655,6 @@ export class Plugin extends AppPlugin {
             entries.push({
                 label: c.name,
                 icon: c.icon || "ti-database",
-                badge: c.hidden ? "hidden" : null,
                 indices: m ? m.indices : null,
                 defaultSel: entries.length === 1,
                 action: () => this._createRecord(c, name),

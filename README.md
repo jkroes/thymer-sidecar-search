@@ -13,15 +13,22 @@ plugin in-app to keep v2.
 **Cloned chrome (2026-07-05):** the palette's appearance is a pixel-clone of the native
 `.cmdpal--dialog`, using computed styles extracted from the live element over CDP
 (scratch scripts `inspect2/3.mjs`): fixed 500px dialog at `top:100px` centered, 5px
-radius, 1px `rgba(255,255,255,.1)` border, the native Material triple box-shadow, bg
-`display-p3(0.129 0.129 0.149)`, teal selection `display-p3(0.267 0.514 0.482)`,
-Cascadia Code monospace (`var(--font-sans)`) at weight 300, plain-text `@` indicator
-and shortcuts (no pills), thin low-opacity dividers, `→` on submenu rows, and NO
-backdrop dim (the doc stays visible behind, like native). Colors are the thymer-dark
-theme's literal values — the app hardcodes per-theme display-p3 colors with no CSS vars
-to inherit, so this matches dark exactly; a light theme would need the light palette's
-values. Deviations from native, all intentional: the `hidden` badge (our extension) and
-a subtle bold/bright matched-char emphasis (native shows none) as a search affordance.
+radius, 1px border, the native Material triple box-shadow, teal selection, Cascadia Code
+monospace (`var(--font-sans)`) at weight 300, plain-text `@` indicator and shortcuts (no
+pills), thin low-opacity dividers, `→` on submenu rows, matched-char highlight cloned
+from native's `.autocomplete--hilite` (bold, brightest fg), and NO backdrop dim (the doc
+stays visible behind, like native).
+
+**Theme-adaptive (2026-07-05):** colors are CSS vars set on each open by
+`_readThemeColors()`, which builds a hidden, off-screen probe from the native class
+names (`.cmdpal--dialog`, `.autocomplete--option-selected`, `.autocomplete--hilite`) and
+reads back whatever the active theme paints them — no palette flash, no hardcoded theme.
+The CSS carries thymer-dark literals as fallbacks if the probe can't read the app's CSS.
+Verified live: switching to `thymer-light` flips the clone to a white dialog, dark text,
+light-teal selection, and a near-black (`rgb(17,17,17)`) highlight instead of white.
+Secondary text (crumb, sub-label, shortcut) is the fg color at reduced opacity, so it
+stays legibly dimmer in any theme. No longer clones the native `hidden`-collection badge
+(native has none) — hidden collections' items still surface in results, just unbadged.
 
 **Flash-free routing (2026-07-05):** the Settings and Search rows originally drove the
 native palette with synthetic keystrokes (⌘⇧P → type → Enter for Settings; sidebar
