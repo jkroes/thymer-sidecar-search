@@ -14,10 +14,16 @@
 //   stopImmediatePropagation suppresses the native palette).
 // - Cmd+Shift+P is natively an alias of Cmd-K and we deliberately do NOT intercept it,
 //   so it remains the escape hatch to the native palette.
-// - Synthetic dispatch works because Thymer's listeners ignore isTrusted. Routes used:
-//   ⌘P → native command mode; ⌘⇧P + typed query + Enter → collection Settings dialog;
-//   click .sidebar-item-search → Search panel.
 // - Suppression exists only while this plugin is loaded; if it crashes, Cmd-K reverts.
+//
+// Native surfaces the SDK doesn't document but reaches anyway (CDP-verified 2026-07-05
+// by reading panel.getNavigation()): Search panel = navigateTo({type:'search_panel',
+// state:{searchQuery}}); collection Settings = navigateTo({type:'collection_settings',
+// rootId:<colGuid>}). These replaced the old palette-driving synthetic routes, so no
+// native modal flashes on the way to the target. The one remaining synthetic route is
+// "> command mode": a synthetic ⌘P opens the native command palette directly (it IS
+// the destination — nothing flashes through), since that palette is a modal, not a
+// panel nav type.
 //
 // UI is raw DOM appended to document.body — never touches editor content (DATA-LOSS
 // DIRECTIVE: no editor DOM, no MutationObserver on body, no content rewriting).
@@ -66,8 +72,6 @@ const DEBOUNCE_MS = 120;
 // thymer-sdk-write-read-model) — poll before navigating.
 const CREATE_POLL_MS = 50;
 const CREATE_POLL_TRIES = 160;
-// Synthetic-dispatch pacing for driving the native palette / search panel.
-const SYNTH_STEP_MS = 150;
 
 export class Plugin extends AppPlugin {
     onLoad() {
@@ -437,7 +441,7 @@ export class Plugin extends AppPlugin {
             }
             add(fuzzyMatch(q, `${c.name}: Collection Settings...`), {
                 label: `${c.name}: Collection Settings...`, icon: "ti-settings", boost: -2,
-                action: () => this._openCollectionSettings(c.name),
+                action: (opts) => this._openCollectionSettings(c, opts),
             });
         }
 
@@ -489,7 +493,7 @@ export class Plugin extends AppPlugin {
         // Always last, like native.
         entries.push({
             label: `Search for '${q}' in all text`, icon: "ti-search", noHighlight: true,
-            action: () => this._openSearchPanel(q),
+            action: (opts) => this._openSearchPanel(q, opts),
         });
         return entries;
     }
@@ -543,7 +547,7 @@ export class Plugin extends AppPlugin {
         }
         actions.push({
             label: `${entry.name}: Collection Settings...`, icon: "ti-settings",
-            action: () => this._openCollectionSettings(entry.name),
+            action: (opts) => this._openCollectionSettings(entry, opts),
         });
         entries.push(...filter(actions));
 
@@ -691,62 +695,47 @@ export class Plugin extends AppPlugin {
         this._openRecord(guid);
     }
 
-    // ---------- synthetic-DOM routes (native palette / search panel) ----------
+    // ---------- panel-nav routes (undocumented but live-verified nav types) ----------
+    // navigateTo accepts more `type`s than the SDK docs list (only edit_panel/overview
+    // are documented). CDP-observed 2026-07-05 by reading panel.getNavigation() after
+    // driving the native UI: the Search panel is `search_panel` with
+    // state.searchQuery, and collection Settings is `collection_settings` with the
+    // collection guid as rootId. Navigating straight to them avoids the palette flash
+    // the old synthetic-keystroke routes caused.
 
+    async _openCollectionSettings(entry, opts) {
+        this._close();
+        const panel = await this._targetPanel(opts && opts.otherPanel);
+        if (!panel) return;
+        panel.navigateTo({
+            type: "collection_settings", rootId: entry.guid, subId: null,
+            workspaceGuid: this.getWorkspaceGuid(),
+        });
+        this.ui.setActivePanel(panel);
+    }
+
+    async _openSearchPanel(query, opts) {
+        this._close();
+        const panel = await this._targetPanel(opts && opts.otherPanel);
+        if (!panel) return;
+        panel.navigateTo({
+            type: "search_panel", rootId: null, subId: null,
+            workspaceGuid: this.getWorkspaceGuid(),
+            state: { searchQuery: query || null },
+        });
+        this.ui.setActivePanel(panel);
+    }
+
+    // Command mode is the native command palette — a modal, not a panel nav. Synthetic
+    // ⌘P opens it directly (Thymer's listeners ignore isTrusted), so there's no
+    // intermediate-modal flash: the palette we open IS the destination.
     _delegateCommandMode() {
-        // Native ⌘P opens the palette already in ">" command mode.
         this._close();
         setTimeout(() => {
             (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", {
                 key: "p", code: "KeyP", keyCode: 80, which: 80,
                 metaKey: true, bubbles: true, cancelable: true,
             }));
-        }, 50);
-    }
-
-    _openCollectionSettings(name) {
-        // No SDK route to the Settings dialog — drive the native palette invisibly:
-        // ⌘⇧P, type "<name> settings", Enter (live-verified 2026-07-05; brief flash OK).
-        this._close();
-        setTimeout(() => {
-            (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", {
-                key: "p", code: "KeyP", keyCode: 80, which: 80,
-                metaKey: true, shiftKey: true, bubbles: true, cancelable: true,
-            }));
-            setTimeout(() => {
-                const input = document.querySelector(".cmdpal--input");
-                if (!input) return;
-                input.value = `${name} settings`;
-                input.dispatchEvent(new Event("input", { bubbles: true }));
-                setTimeout(() => {
-                    input.dispatchEvent(new KeyboardEvent("keydown", {
-                        key: "Enter", code: "Enter", keyCode: 13, which: 13,
-                        bubbles: true, cancelable: true,
-                    }));
-                }, SYNTH_STEP_MS);
-            }, SYNTH_STEP_MS);
-        }, 50);
-    }
-
-    _openSearchPanel(query) {
-        // Native Search panel via sidebar toggle (event="onToggleSearch").
-        this._close();
-        setTimeout(() => {
-            const el = document.querySelector(".sidebar-item-search");
-            if (!el) {
-                this.ui.addToaster({ title: "Sidecar Search", message: "Search panel not found.", dismissible: true });
-                return;
-            }
-            el.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
-            if (!query) return;
-            // Prefill is best-effort (untested route): the panel focuses its input.
-            setTimeout(() => {
-                const ae = document.activeElement;
-                if (ae && ae.tagName === "INPUT" && !ae.classList.contains("scs-input")) {
-                    ae.value = query;
-                    ae.dispatchEvent(new Event("input", { bubbles: true }));
-                }
-            }, SYNTH_STEP_MS * 2);
         }, 50);
     }
 }

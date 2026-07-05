@@ -6,10 +6,20 @@ hot-reload push).** Verified live: root empty layout, fuzzy ranked mixed list
 "7 days" → Sun Jul 12, "aug 1" in journal submenu), submenu ordering + full item list +
 filter-with-selection-on-first-match, Backspace-to-root, Esc semantics, Enter-open,
 Shift+Enter → new split panel, `>` → native palette in command mode, Settings row →
-real Settings dialog (invisible ⌘⇧P drive), Search-for row → Search panel WITH query
-prefill (the spec's untested prefill route works: the panel focuses its input, and
-value + input event executes the search). NOT persisted in-app yet — hot-reload pushes
-are ephemeral; stop hot reload and save the plugin in-app to keep v2.
+real Settings dialog, Search-for row → Search panel with query already applied. NOT
+persisted in-app yet — hot-reload pushes are ephemeral; stop hot reload and save the
+plugin in-app to keep v2.
+
+**Flash-free routing (2026-07-05):** the Settings and Search rows originally drove the
+native palette with synthetic keystrokes (⌘⇧P → type → Enter for Settings; sidebar
+click + input prefill for Search), which flashed native modals on the way to the
+target. Replaced with direct `panel.navigateTo` calls using two nav `type`s the SDK
+docs omit but the app honors (discovered by reading `panel.getNavigation()` after
+driving the native UI over CDP): `search_panel` with `state.searchQuery` and
+`collection_settings` with the collection guid as `rootId`. No intermediate modal now
+appears. Command mode is the sole remaining synthetic route — a synthetic ⌘P opens the
+native command palette, which is itself the destination (a modal, not a panel nav), so
+nothing flashes through.
 
 Live-test notes: the `hidden` badge currently appears on "New Dynamic Collection", not
 Examples — the `show_cmdpal_items:false` flag moved since the spec study (data, not a
@@ -36,11 +46,11 @@ Implements the spec's full gap list:
    `Mon Jul 6` jump row → `panel.navigateToJournal(user, dt)`. Calendar widget skipped
    (optional per spec). Bare-number queries excluded to avoid noise.
 7. Hidden-items extension KEPT: flagged collections' items ranked + badged `hidden`.
-8. Synthetic-DOM routes (all per spec, live-verified there): `>` as first char or hint
-   row → ⌘P (native command mode); `Search for 'q' in all text` → click
-   `.sidebar-item-search` + best-effort query prefill (prefill untested); Settings rows
-   → invisible native-palette drive (⌘⇧P → type `<name> settings` → Enter; brief flash
-   possible; assumes the settings row ranks first for that query, as observed).
+8. Reaching native-only surfaces: `Search for 'q' in all text` →
+   `navigateTo({type:'search_panel', state:{searchQuery:q}})`; Settings rows →
+   `navigateTo({type:'collection_settings', rootId:colGuid})`; `>` as first char or the
+   hint row → synthetic ⌘P opens the native command palette directly. All three land on
+   the target with no native-modal flash (see "Flash-free routing" above).
 
 Not replicated: Tags pseudo-collection (no SDK hashtag enumeration; tag rows would
 need the Search-panel route anyway) and the inline calendar widget. Exact native
