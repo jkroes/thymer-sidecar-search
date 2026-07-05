@@ -10,6 +10,19 @@ real Settings dialog, Search-for row → Search panel with query already applied
 persisted in-app yet — hot-reload pushes are ephemeral; stop hot reload and save the
 plugin in-app to keep v2.
 
+**Cloned chrome (2026-07-05):** the palette's appearance is a pixel-clone of the native
+`.cmdpal--dialog`, using computed styles extracted from the live element over CDP
+(scratch scripts `inspect2/3.mjs`): fixed 500px dialog at `top:100px` centered, 5px
+radius, 1px `rgba(255,255,255,.1)` border, the native Material triple box-shadow, bg
+`display-p3(0.129 0.129 0.149)`, teal selection `display-p3(0.267 0.514 0.482)`,
+Cascadia Code monospace (`var(--font-sans)`) at weight 300, plain-text `@` indicator
+and shortcuts (no pills), thin low-opacity dividers, `→` on submenu rows, and NO
+backdrop dim (the doc stays visible behind, like native). Colors are the thymer-dark
+theme's literal values — the app hardcodes per-theme display-p3 colors with no CSS vars
+to inherit, so this matches dark exactly; a light theme would need the light palette's
+values. Deviations from native, all intentional: the `hidden` badge (our extension) and
+a subtle bold/bright matched-char emphasis (native shows none) as a search affordance.
+
 **Flash-free routing (2026-07-05):** the Settings and Search rows originally drove the
 native palette with synthetic keystrokes (⌘⇧P → type → Enter for Settings; sidebar
 click + input prefill for Search), which flashed native modals on the way to the

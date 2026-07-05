@@ -30,39 +30,48 @@
 //
 // `export` works only in the esbuild dev/build loop; paste dist/plugin.js instead.
 
+// Chrome cloned pixel-for-pixel from the native Cmd-K palette (.cmdpal--dialog),
+// computed-styles extracted over CDP 2026-07-05. Values are the thymer-dark theme's
+// (the app hardcodes per-theme display-p3 colors — no CSS vars to inherit — so this
+// matches the dark theme exactly; a light theme would need the light palette's values).
+// Native uses NO backdrop dim (doc stays fully visible); the backdrop here is a
+// transparent click-catcher only.
 const CSS = `
-.scs-backdrop{position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.35);
-  display:flex;align-items:flex-start;justify-content:center;padding-top:12vh;}
-.scs-palette{width:620px;max-width:92vw;max-height:62vh;display:flex;flex-direction:column;
-  background:#1f2126;color:#e8e8ea;border:1px solid rgba(255,255,255,.09);
-  border-radius:12px;box-shadow:0 18px 50px rgba(0,0,0,.5);overflow:hidden;
-  font-family:var(--font-sans,-apple-system,BlinkMacSystemFont,sans-serif);}
-.scs-inputrow{display:flex;align-items:center;gap:8px;padding:12px 14px;
-  border-bottom:1px solid rgba(255,255,255,.07);}
-.scs-searchtype{background:rgba(255,255,255,.1);border-radius:6px;padding:2px 8px;
-  font-size:13px;font-weight:600;white-space:nowrap;}
-.scs-crumb{background:rgba(255,255,255,.1);border-radius:6px;padding:2px 8px;
-  font-size:12px;white-space:nowrap;}
-.scs-input{flex:1;background:transparent;border:none;outline:none;color:inherit;font-size:16px;}
-.scs-list{overflow-y:auto;flex:1;padding:6px;}
-.scs-divider{height:1px;margin:5px 10px;background:rgba(255,255,255,.08);}
-.scs-static{padding:7px 10px;font-size:13px;opacity:.5;font-style:italic;}
-.scs-row{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:8px;
-  cursor:pointer;font-size:14px;}
-.scs-row.scs-sel{background:rgba(94,129,244,.25);}
-.scs-icon{width:20px;text-align:center;opacity:.8;flex:none;}
+.scs-backdrop{position:fixed;inset:0;z-index:99999;background:transparent;
+  display:flex;align-items:flex-start;justify-content:center;padding-top:100px;}
+.scs-palette{width:500px;max-width:92vw;max-height:62vh;display:flex;flex-direction:column;
+  background:color(display-p3 0.129 0.129 0.149);color:color(display-p3 0.769 0.769 0.769);
+  border:1px solid rgba(255,255,255,.1);border-radius:5px;overflow:hidden;font-weight:300;
+  box-shadow:rgba(0,0,0,.14) 0 12px 17px 2px,rgba(0,0,0,.12) 0 5px 22px 4px,rgba(0,0,0,.2) 0 7px 8px -4px;
+  font-family:var(--font-sans,ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace);}
+.scs-inputrow{display:flex;align-items:center;gap:0;padding:5px;}
+.scs-searchtype{padding:5px 0 5px 5px;font-size:14px;white-space:nowrap;}
+.scs-crumb{padding:5px 0 5px 5px;font-size:14px;white-space:nowrap;
+  color:color(display-p3 0.541 0.541 0.541);}
+.scs-input{flex:1;background:transparent;border:none;outline:none;color:inherit;
+  font:inherit;font-size:15px;padding:10px;}
+.scs-input::placeholder{color:color(display-p3 0.541 0.541 0.541);}
+.scs-list{overflow-y:auto;flex:1;padding:0 0 5px;}
+.scs-divider{height:0;margin:6px 10px 6px 5px;border-top:1.5px solid rgba(255,255,255,.1);opacity:.3;}
+.scs-static{padding:5px 10px 5px 15px;font-size:14px;
+  color:color(display-p3 0.541 0.541 0.541);}
+.scs-row{display:flex;align-items:center;gap:8px;padding:5px 10px;border-radius:3px;
+  margin:0 5px;width:calc(100% - 10px);box-sizing:border-box;cursor:pointer;font-size:14px;}
+.scs-row.scs-sel{background:color(display-p3 0.267 0.514 0.482);color:color(display-p3 0.929 0.929 0.929);}
+.scs-icon{flex:none;min-width:16px;text-align:center;color:color(display-p3 0.929 0.929 0.929);}
 .scs-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.scs-label mark{background:transparent;color:#8ab4ff;font-weight:600;}
-.scs-arrow{opacity:.5;flex:none;}
-.scs-sub{opacity:.45;font-size:12px;flex:none;max-width:35%;overflow:hidden;
-  text-overflow:ellipsis;white-space:nowrap;}
-.scs-key{opacity:.55;font-size:12px;flex:none;border:1px solid rgba(255,255,255,.18);
-  border-radius:4px;padding:0 5px;}
-.scs-badge{font-size:10px;border:1px solid rgba(255,255,255,.25);border-radius:4px;
-  padding:0 5px;opacity:.6;flex:none;}
-.scs-footer{padding:8px 14px;font-size:11px;opacity:.45;
-  border-top:1px solid rgba(255,255,255,.07);}
-.scs-empty{padding:18px;text-align:center;opacity:.5;font-size:13px;}
+.scs-label mark{background:transparent;color:color(display-p3 0.929 0.929 0.929);font-weight:400;}
+.scs-arrow{flex:none;color:color(display-p3 0.929 0.929 0.929);}
+.scs-sub{flex:none;font-size:14px;max-width:38%;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;color:color(display-p3 0.541 0.541 0.541);}
+.scs-key{flex:none;font-size:14px;color:color(display-p3 0.541 0.541 0.541);}
+.scs-badge{flex:none;font-size:10px;text-transform:uppercase;letter-spacing:.04em;
+  border:1px solid rgba(255,255,255,.2);border-radius:3px;padding:0 5px;
+  color:color(display-p3 0.541 0.541 0.541);}
+.scs-footer{padding:10px;font-size:11px;color:color(display-p3 0.769 0.769 0.769);
+  border-top:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between;}
+.scs-empty{padding:18px;text-align:center;font-size:14px;
+  color:color(display-p3 0.541 0.541 0.541);}
 `;
 
 const MAX_RESULTS = 40;
