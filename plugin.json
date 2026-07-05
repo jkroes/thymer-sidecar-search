@@ -1,0 +1,6 @@
+{
+  "ver": 1,
+  "name": "Sidecar Search",
+  "icon": "search",
+  "description": "Cmd-K replacement popup: search collections (incl. hidden), views, pages, and content; per-collection sub-palette; create pages. Native palette stays on Cmd+Shift+P."
+}
