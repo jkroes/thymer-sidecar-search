@@ -65,8 +65,10 @@ Open Today's Journal                 ⌘J           (command row)
   creating journal records.)
 - **`show_cmdpal_items: false`** (Examples is flagged here): hides the collection's
   ITEMS from all palette search — the collection row, views, create, and settings rows
-  STILL appear. Items don't appear even inside its own submenu. This is the gap
-  sidecar-search exists to fill.
+  STILL appear. Items don't appear even inside its own submenu. Use case driving
+  sidecar-search: hide a big master collection's items, then surface them through
+  dynamic collections representing subsets — but native dynamic collections can't
+  override the flag (tested 2026-07-04), hence the plugin.
 
 ## Collection submenu (Enter on `<name> →`; ArrowRight does NOT enter)
 
@@ -78,11 +80,11 @@ ZZ Sandbox: New Test Note     (item_name)
 Table                         (one row per view)
 ZZ Sandbox: Collection Settings...
 ──────────
-ZZ Test Page 1                (items — RECENT ones only; a collection with no
-Untitled ×3                    recently-touched items shows NO item rows, and
-Untitled Test Note ×2          typing in the submenu does NOT search all items —
-                               only filters the recent list. "get" in Examples
-                               submenu → "No results" despite "Getting Started")
+ZZ Test Page 1                (items — ALL of them; verified on unflagged Notes:
+Untitled ×3                    full item list shown and typing searches all items.
+Untitled Test Note ×2          A flagged collection (show_cmdpal_items:false) shows
+                               NO item rows and its submenu search finds nothing —
+                               the flag, not recency, hides them)
 ```
 - Journal submenu: `Try: monday, 7 days, aug 1` hint + Open Collection + Settings
   (no New row, no items).
@@ -109,7 +111,7 @@ Untitled Test Note ×2          typing in the submenu does NOT search all items 
 - ArrowUp/Down navigate (wraps); Enter select; Shift+Enter other-panel; mouse hover moves selection.
 - Esc: in submenu → back to root; at root → close.
 - Backspace: edits text; on EMPTY input in submenu → back to root.
-- Typing filters within the current submenu (recent items only, see above).
+- Typing filters within the current submenu (all items; flagged collections excluded).
 
 ## Gaps vs sidecar-search v1 (parity work)
 
@@ -119,7 +121,7 @@ Achievable with SDK:
    item_name too; create-picker limited to creatable collections (exclude journal +
    dynamic; `isJournalPlugin()` exists).
 3. Submenu: `← Back` row, native ordering (Open → New → views → Settings → divider →
-   items), recent-items-only list (approximate: sort by updatedAt desc, cap).
+   items), full item list.
 4. Hint/footer chrome: mode indicator, placeholder text, footer hints.
 5. Shift+Enter → other panel (`ui.createPanel({afterPanel})` / second panel).
 6. Date parsing → jump row via `panel.navigateToJournal(user, DateTime...)` (SDK has
@@ -127,16 +129,16 @@ Achievable with SDK:
 7. `Open Today's Journal` command row (⌘J hint).
 8. Hidden-items extension: KEEP — surface flagged collections' items (badge them).
 
-NOT achievable via SDK (delegate to native or omit):
-- `X: Collection Settings...` → settings dialog is unreachable; either omit or
-  synthesize native palette open.
-- `Search for 'q' in all text` → Search panel unreachable; either reimplement with
-  searchByQuery lines channel in our own UI, or omit.
-- Tag rows' target (Search panel) — same limitation; tag LIST itself may be
-  enumerable (unverified).
-- `>` command mode contents (built-in command registry is opaque) → keep the hint row
-  but delegate to native (synthetic ⌘P-equivalent) or drop.
+Not in the SDK but REACHABLE via synthetic DOM driving (all live-verified 2026-07-05;
+Thymer's UI responds fully to isTrusted:false events):
+- `>` command mode → synthetic ⌘P keydown opens the native palette already in > mode.
+- Search panel → synthetic click on `.sidebar-item-search` (`event="onToggleSearch"`).
+  (Query prefill into the Search panel input: untested, likely the same trick.)
+- `X: Collection Settings...` → drive the native palette invisibly: synthetic ⌘⇧P,
+  set `.cmdpal--input` value to "<collection> settings" + input event, synthetic Enter
+  on the input → real Settings dialog opens. (Brief palette flash possible.)
+- Tag rows → same Search-panel route.
 
-Unobservable/undetermined: exact fuzzy ranking weights; recent-items window/cap;
-user-row behavior (single-user workspace); date-row effect (untested to avoid
-creating journal records).
+Unobservable/undetermined: exact fuzzy ranking weights; user-row behavior
+(single-user workspace); date-row effect (untested to avoid creating journal
+records).
