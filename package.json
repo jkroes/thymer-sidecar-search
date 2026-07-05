@@ -1,0 +1,12 @@
+{
+  "name": "thymer-sidecar-search",
+  "version": "1.0.0",
+  "description": "Cmd-K replacement palette for Thymer with native-palette parity, cloned theme-adaptive chrome, and hidden-collection search.",
+  "license": "MIT",
+  "scripts": {
+    "build": "esbuild plugin.js --bundle --format=iife --global-name=plugins --keep-names --loader:.css=text --outfile=dist/plugin.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.6"
+  }
+}

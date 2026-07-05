@@ -1,0 +1,4 @@
+node_modules/
+.DS_Store
+*.log
+# dist/plugin.js is committed on purpose — it's the pasteable bundle.
