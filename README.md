@@ -35,9 +35,10 @@ Implements the spec's full gap list:
 2. Root empty query = native layout: `Press > to filter commands only... ⌘P` hint row,
    divider, collections (regular + dynamic; hidden-flagged badged), divider,
    `Open Today's Journal` (⌘J).
-3. Submenu: `← Back` row, native ordering (Open → New → views → Settings → divider →
-   full item list), `Open Collection 'X'` as default selection; journal submenu = date
-   hint + Open + Settings (no New/items, date query → jump row); dynamic submenu = no
+3. Submenu: `Back` row (ti-arrow-left icon only — no inline `←`, unlike the native
+   text label), native ordering (Open → New → views → Settings → divider → full item
+   list), `Open Collection 'X'` as default selection; journal submenu = date hint +
+   Open + Settings (no New/items, date query → jump row); dynamic submenu = no
    New/items; create-picker excludes journal + dynamic collections.
 4. Chrome: `@` mode indicator, native placeholder, native-style footer.
 5. Shift+Enter (and shift-click) → other panel (`createPanel({afterPanel})` when
@@ -48,8 +49,11 @@ Implements the spec's full gap list:
 7. Hidden-items extension KEPT: flagged collections' items ranked + badged `hidden`.
 8. Reaching native-only surfaces: `Search for 'q' in all text` →
    `navigateTo({type:'search_panel', state:{searchQuery:q}})`; Settings rows →
-   `navigateTo({type:'collection_settings', rootId:colGuid})`; `>` as first char or the
-   hint row → synthetic ⌘P opens the native command palette directly. All three land on
+   `navigateTo({type:'collection_settings', rootId:colGuid})`. Both open in a SIDE
+   panel (`_targetPanel(true)` — reuse a second panel or split) so the current doc
+   stays put, since these are utility surfaces you read alongside your work. `>` as
+   first char or the hint row → synthetic ⌘P opens the native command palette directly.
+   All three land on
    the target with no native-modal flash (see "Flash-free routing" above).
 
 Not replicated: Tags pseudo-collection (no SDK hashtag enumeration; tag rows would

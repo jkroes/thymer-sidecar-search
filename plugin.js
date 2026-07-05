@@ -5,7 +5,7 @@
 // v2: native-palette parity per native-palette-spec.md (CDP-observed 2026-07-05):
 // fuzzy subsequence matching in one ranked list, inline action rows (Open Collection /
 // New <item> / Settings / Search-all-text / Create-in), native submenu ordering with
-// "← Back", Shift+Enter → other panel, date queries → journal jump row, "Open Today's
+// "Back", Shift+Enter → other panel, date queries → journal jump row, "Open Today's
 // Journal", and "> command mode" delegation to the native palette. Tags pseudo-
 // collection is NOT replicated (no SDK hashtag enumeration).
 //
@@ -441,7 +441,7 @@ export class Plugin extends AppPlugin {
             }
             add(fuzzyMatch(q, `${c.name}: Collection Settings...`), {
                 label: `${c.name}: Collection Settings...`, icon: "ti-settings", boost: -2,
-                action: (opts) => this._openCollectionSettings(c, opts),
+                action: () => this._openCollectionSettings(c),
             });
         }
 
@@ -493,7 +493,7 @@ export class Plugin extends AppPlugin {
         // Always last, like native.
         entries.push({
             label: `Search for '${q}' in all text`, icon: "ti-search", noHighlight: true,
-            action: (opts) => this._openSearchPanel(q, opts),
+            action: () => this._openSearchPanel(q),
         });
         return entries;
     }
@@ -521,7 +521,7 @@ export class Plugin extends AppPlugin {
         }) : rows;
 
         entries.push({
-            label: "← Back", icon: "ti-arrow-left", noHighlight: true,
+            label: "Back", icon: "ti-arrow-left", noHighlight: true,
             action: () => this._back(),
         });
 
@@ -547,7 +547,7 @@ export class Plugin extends AppPlugin {
         }
         actions.push({
             label: `${entry.name}: Collection Settings...`, icon: "ti-settings",
-            action: (opts) => this._openCollectionSettings(entry, opts),
+            action: () => this._openCollectionSettings(entry),
         });
         entries.push(...filter(actions));
 
@@ -580,11 +580,11 @@ export class Plugin extends AppPlugin {
         return this._fixSubmenuSel(entries, q);
     }
 
-    // When filtering a submenu, select the first match — never the "← Back" row.
+    // When filtering a submenu, select the first match — never the "Back" row.
     _fixSubmenuSel(entries, q) {
         if (q) {
             for (const en of entries) en.defaultSel = false;
-            const first = entries.find((en) => en.action && en.label !== "← Back");
+            const first = entries.find((en) => en.action && en.label !== "Back");
             if (first) first.defaultSel = true;
         }
         return entries;
@@ -595,7 +595,7 @@ export class Plugin extends AppPlugin {
     _createPickEntries(q) {
         const name = this._level.name;
         const entries = [{
-            label: "← Back", icon: "ti-arrow-left", noHighlight: true,
+            label: "Back", icon: "ti-arrow-left", noHighlight: true,
             action: () => this._back(),
         }];
         // Native create-picker: only creatable collections (no Journal/Tags/dynamic).
@@ -703,9 +703,10 @@ export class Plugin extends AppPlugin {
     // collection guid as rootId. Navigating straight to them avoids the palette flash
     // the old synthetic-keystroke routes caused.
 
-    async _openCollectionSettings(entry, opts) {
+    async _openCollectionSettings(entry) {
         this._close();
-        const panel = await this._targetPanel(opts && opts.otherPanel);
+        // Utility surface — always a side panel so the current doc stays put.
+        const panel = await this._targetPanel(true);
         if (!panel) return;
         panel.navigateTo({
             type: "collection_settings", rootId: entry.guid, subId: null,
@@ -714,9 +715,10 @@ export class Plugin extends AppPlugin {
         this.ui.setActivePanel(panel);
     }
 
-    async _openSearchPanel(query, opts) {
+    async _openSearchPanel(query) {
         this._close();
-        const panel = await this._targetPanel(opts && opts.otherPanel);
+        // Utility surface — always a side panel so the current doc stays put.
+        const panel = await this._targetPanel(true);
         if (!panel) return;
         panel.navigateTo({
             type: "search_panel", rootId: null, subId: null,
