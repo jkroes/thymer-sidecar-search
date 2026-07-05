@@ -41,6 +41,22 @@ appears. Command mode is the sole remaining synthetic route — a synthetic ⌘P
 native command palette, which is itself the destination (a modal, not a panel nav), so
 nothing flashes through.
 
+**show_cmdpal_items honored, with dynamic-collection override (2026-07-05):** the
+hidden-items extension (item 7 below) is REVERSED by user decision. A collection with
+`show_cmdpal_items: false` no longer contributes page rows (root ranked list,
+searchByQuery tail, or its own submenu item list) — EXCEPT records that belong to a view
+of a non-hidden dynamic collection, which override their source collection's flag.
+Membership is resolved per view from its config (`source_collections` guids-or-`"*"` +
+`query` in app search syntax, both live-verified fields): query views run through
+`data.searchByQuery` (results filtered to the view's sources), no-query views admit
+whole source collections. Allowlist rebuilt in `_rebuildDynAllow()` after the record
+cache lands (needs `_recCol` to attribute hits), gated by `_recVisible()` at the three
+render sites. Live-verified: Examples (`false`) + dynamic view `@Examples.Title = "Ex"`
+(`true`) → "Dashboard Example"/"Untitled Example" surface, "Editor"/"Getting
+Started"/"What is Thymer" don't; Notes unaffected; Examples submenu lists only the two
+rescued items. Note the native palette does NOT do the override (native hides all
+Examples items) — this is now our extension in the opposite direction.
+
 Live-test notes: the `hidden` badge currently appears on "New Dynamic Collection", not
 Examples — the `show_cmdpal_items:false` flag moved since the spec study (data, not a
 bug). Native's "test" → "Development history" match (not a title subsequence) is NOT
@@ -72,7 +88,8 @@ Implements the spec's full gap list:
 6. Date queries (`monday`, `aug 1`, `7 days`) via `DateTime.parseDateTimeString` →
    `Mon Jul 6` jump row → `panel.navigateToJournal(user, dt)`. Calendar widget skipped
    (optional per spec). Bare-number queries excluded to avoid noise.
-7. Hidden-items extension KEPT: flagged collections' items ranked + badged `hidden`.
+7. ~~Hidden-items extension KEPT: flagged collections' items ranked + badged `hidden`.~~
+   SUPERSEDED 2026-07-05: flag now honored, with dynamic-collection override (see above).
 8. Reaching native-only surfaces: `Search for 'q' in all text` →
    `navigateTo({type:'search_panel', state:{searchQuery:q}})`; Settings rows →
    `navigateTo({type:'collection_settings', rootId:colGuid})`. Both open in a SIDE

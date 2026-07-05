@@ -78,6 +78,7 @@ const CSS = `
 const MAX_RESULTS = 40;
 const SEARCH_LIMIT = 100;
 const DEBOUNCE_MS = 120;
+const DYN_ALLOW_LIMIT = 500; // per dynamic view, when resolving its member records
 // New records aren't immediately readable after createRecord (see memory:
 // thymer-sdk-write-read-model) — poll before navigating.
 const CREATE_POLL_MS = 50;
@@ -97,6 +98,8 @@ export class Plugin extends AppPlugin {
         this._cols = [];
         this._colRecords = new Map(); // colGuid -> PluginRecord[]
         this._recCol = new Map();     // recordGuid -> collection entry
+        this._dynAllowRecs = new Set(); // record guids rescued by a visible dynamic view
+        this._dynAllowCols = new Set(); // collection guids fully rescued ("*" = all)
 
         this._keyHandler = (e) => this._onGlobalKey(e);
         window.addEventListener("keydown", this._keyHandler, true);
@@ -174,13 +177,55 @@ export class Plugin extends AppPlugin {
         // Record cache: powers submenu item lists, fuzzy title matching at root, and
         // the collection label on page results. Built in the background; UI works
         // without it. Dynamic collections own no records — skip them.
+        const fetches = [];
         for (const entry of this._cols) {
             if (entry.isDynamic) continue;
-            entry.col.getAllRecords().then((records) => {
+            fetches.push(entry.col.getAllRecords().then((records) => {
                 this._colRecords.set(entry.guid, records || []);
                 for (const r of records || []) this._recCol.set(r.guid, entry);
-            }).catch(() => {});
+            }).catch(() => {}));
         }
+        // Needs _recCol populated to attribute query hits to source collections.
+        Promise.all(fetches).then(() => this._rebuildDynAllow());
+    }
+
+    // show_cmdpal_items: a hidden collection's records stay out of the palette
+    // UNLESS a view of a NON-hidden dynamic collection includes them — the dynamic
+    // collection's flag overrides its sources'. Views define membership as
+    // source_collections (guids or "*") + a search query; a view with no query
+    // holds every record of its sources.
+    async _rebuildDynAllow() {
+        const allowRecs = new Set();
+        const allowCols = new Set();
+        const jobs = [];
+        for (const c of this._cols) {
+            if (!c.isDynamic || c.hidden) continue;
+            for (const v of c.views) {
+                const srcs = v.source_collections || ["*"];
+                if (!v.query) {
+                    for (const s of srcs) allowCols.add(s);
+                    continue;
+                }
+                jobs.push(this.data.searchByQuery(v.query, DYN_ALLOW_LIMIT).then((res) => {
+                    for (const r of (res && !res.error && res.records) || []) {
+                        const col = this._recCol.get(r.guid);
+                        if (srcs.includes("*") || (col && srcs.includes(col.guid))) {
+                            allowRecs.add(r.guid);
+                        }
+                    }
+                }).catch(() => {}));
+            }
+        }
+        await Promise.all(jobs);
+        this._dynAllowRecs = allowRecs;
+        this._dynAllowCols = allowCols;
+        if (this._overlay) this._render();
+    }
+
+    _recVisible(recGuid, colEntry) {
+        if (!colEntry || !colEntry.hidden) return true;
+        if (this._dynAllowCols.has("*") || this._dynAllowCols.has(colEntry.guid)) return true;
+        return this._dynAllowRecs.has(recGuid);
     }
 
     _creatable() {
@@ -507,6 +552,7 @@ export class Plugin extends AppPlugin {
         for (const [guid, records] of this._colRecords) {
             const colEntry = this._cols.find((c) => c.guid === guid);
             for (const r of records) {
+                if (!this._recVisible(r.guid, colEntry)) continue;
                 const m = fuzzyMatch(q, r.getName() || "");
                 if (!m) continue;
                 seen.add(r.guid);
@@ -518,6 +564,7 @@ export class Plugin extends AppPlugin {
         for (const r of this._searchRecs) {
             if (seen.has(r.guid)) continue;
             const colEntry = this._recCol.get(r.guid) || null;
+            if (!this._recVisible(r.guid, colEntry)) continue;
             const m = fuzzyMatch(q, r.getName() || "");
             add(6, m || { score: 0, indices: [] }, this._pageRow(r, colEntry));
         }
@@ -623,7 +670,8 @@ export class Plugin extends AppPlugin {
         }
         if (entry.isDynamic) return this._fixSubmenuSel(entries, q); // no owned items
 
-        const records = this._colRecords.get(entry.guid) || [];
+        const records = (this._colRecords.get(entry.guid) || [])
+            .filter((r) => this._recVisible(r.guid, entry));
         const itemRows = filter(records.map((r) => {
             const row = this._pageRow(r, entry);
             row.sub = null; // collection label is redundant inside its own submenu
