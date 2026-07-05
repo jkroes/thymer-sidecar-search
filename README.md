@@ -18,6 +18,11 @@ Findings from testing:
   lines channel + `navigateTo({itemGuid, highlight:true})` remain available if a
   full-text mode is ever wanted.
 
+**Native palette spec:** `native-palette-spec.md` — full CDP-driven observation of
+Cmd-K/Cmd-Shift-P (rows, submenus, selection effects, keyboard semantics) + gap list.
+Key correction from that study: `show_cmdpal_items: false` hides a collection's ITEMS
+from the palette, not the collection row itself.
+
 ## Goal
 
 **Duplicate and extend Cmd-K** (the search/navigation palette) as a plugin-owned popup
