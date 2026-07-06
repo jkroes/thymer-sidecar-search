@@ -146,8 +146,9 @@ const CREATE_POLL_TRIES = 160;
 // hijack plain typing; anything unparseable falls back to these defaults.
 const DEFAULT_JUMP_SHORTCUT = "Mod+K";
 const DEFAULT_CMD_SHORTCUT = "Mod+P";
-const IS_MAC = /Mac|iP(hone|ad|od)/.test(
-    // navigator.platform is deprecated but is the only signal on Safari/Firefox
+// Case-insensitive: userAgentData.platform is "macOS" (lowercase m), navigator.platform
+// is "MacIntel". navigator.platform is deprecated but the only signal on Safari/Firefox.
+const IS_MAC = /mac|ip(hone|ad|od)/i.test(
     (navigator.userAgentData && navigator.userAgentData.platform) || navigator["platform"] || ""
 );
 

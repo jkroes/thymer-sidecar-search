@@ -97,8 +97,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
   var CREATE_POLL_TRIES = 160;
   var DEFAULT_JUMP_SHORTCUT = "Mod+K";
   var DEFAULT_CMD_SHORTCUT = "Mod+P";
-  var IS_MAC = /Mac|iP(hone|ad|od)/.test(
-    // navigator.platform is deprecated but is the only signal on Safari/Firefox
+  var IS_MAC = /mac|ip(hone|ad|od)/i.test(
     navigator.userAgentData && navigator.userAgentData.platform || navigator["platform"] || ""
   );
   var Plugin = class extends AppPlugin {
