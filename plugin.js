@@ -14,9 +14,12 @@
 // read it live rather than hardcoding. Architecture (learned the hard way — the
 // pitfalls below are all real):
 //   - ONE kept-alive native palette per command-mode session (this._nativePal),
-//     opened via a SINGLE synthetic ⌘P. Repeated/retried ⌘P desync the palette's
-//     open/close toggle into a wedged empty-catalog state, so we open exactly once
-//     and only ever destroy() to close (node.remove() desyncs the component too).
+//     opened via a SINGLE call to the sidebar component's showCommandPalette() —
+//     the app's own launch_cmdpal handler, found by duck-typed tree walk — so it
+//     survives native-shortcut remaps (a synthetic ⌘P doesn't; kept only as a
+//     fallback). Repeated/retried opens desync the palette's open/close toggle into
+//     a wedged empty-catalog state, so we open exactly once and only ever destroy()
+//     to close (node.remove() desyncs the component too).
 //   - The palette is hidden with opacity:0, NOT visibility:hidden — a
 //     visibility:hidden element can't focus its own input, and that self-focus is
 //     what lets us locate the palette component (via the app's g_focusedComponent →
@@ -596,6 +599,30 @@ export class Plugin extends AppPlugin {
         if (root) this._appRoot = root;
     }
 
+    // The app's sidebar component, duck-typed by its showCommandPalette method — the
+    // same method the app's own launch_cmdpal action calls. Lets us open the native
+    // palette without synthesizing a keystroke, so it keeps working when the user
+    // remaps the native palette bindings (custom keyboard shortcuts).
+    _findSidebar() {
+        const roots = [];
+        const fresh = this._climbRoot(this._gfc());
+        if (fresh) { roots.push(fresh); this._appRoot = fresh; }
+        if (this._appRoot && this._appRoot !== fresh) roots.push(this._appRoot);
+        for (const root of roots) {
+            const stack = [root];
+            const seen = new Set();
+            while (stack.length) {
+                const comp = stack.pop();
+                if (!comp || seen.has(comp)) continue;
+                seen.add(comp);
+                if (!comp._destroyed && typeof comp.showCommandPalette === "function") return comp;
+                if (comp.children) for (const ch of comp.children) stack.push(ch);
+                if (comp.sideBar) stack.push(comp.sideBar);
+            }
+        }
+        return null;
+    }
+
     // Locate the LIVE native palette component for an open .cmdpal--dialog. Its DOM
     // node has no back-reference to its component, so we DFS the component tree from
     // a root climbed fresh from g_focusedComponent (the just-opened palette is the
@@ -639,8 +666,12 @@ export class Plugin extends AppPlugin {
 
     // Ensure a single veiled native command palette is open and populated, stored on
     // this._nativePal. Idempotent — reused across renders and executions in a session.
-    // ONE synthetic ⌘P (Thymer ignores isTrusted); if a stray palette is already open
-    // we destroy it first so our ⌘P opens fresh rather than toggling it closed.
+    // Opened by calling the sidebar's showCommandPalette() directly (the app's own
+    // launch_cmdpal handler), NOT by synthesizing the shortcut — a synthetic ⌘P stops
+    // working the moment the user remaps the native palette via custom keyboard
+    // shortcuts. Synthetic ⌘P remains only as a fallback if the sidebar isn't found.
+    // If a stray palette is already open we destroy it first so our open call opens
+    // fresh rather than toggling it closed.
     async _ensureNativePal() {
         if (this._nativeAC()) return this._nativePal;
         this._nativePal = null;
@@ -654,10 +685,15 @@ export class Plugin extends AppPlugin {
         // still focuses its own input on open — which is what makes _findNativePal
         // locate it in ~5 ms). No flash: the palette is hidden from the first paint.
         this._setVeil(true);
-        document.body.dispatchEvent(new KeyboardEvent("keydown", {
-            key: "p", code: "KeyP", keyCode: 80, which: 80,
-            metaKey: true, bubbles: true, cancelable: true,
-        }));
+        const sidebar = this._findSidebar();
+        if (sidebar) {
+            try { sidebar.showCommandPalette(); } catch (e) { /* fall through to poll */ }
+        } else {
+            document.body.dispatchEvent(new KeyboardEvent("keydown", {
+                key: "p", code: "KeyP", keyCode: 80, which: 80,
+                metaKey: true, bubbles: true, cancelable: true,
+            }));
+        }
         const deadline = Date.now() + 1500;
         while (Date.now() < deadline) {
             if (!this._overlayOrOpening()) { this._destroyPal(this._findNativePal()); this._setVeil(false); return null; }

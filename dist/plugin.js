@@ -482,6 +482,32 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       const root = this._climbRoot(this._gfc());
       if (root) this._appRoot = root;
     }
+    // The app's sidebar component, duck-typed by its showCommandPalette method — the
+    // same method the app's own launch_cmdpal action calls. Lets us open the native
+    // palette without synthesizing a keystroke, so it keeps working when the user
+    // remaps the native palette bindings (custom keyboard shortcuts).
+    _findSidebar() {
+      const roots = [];
+      const fresh = this._climbRoot(this._gfc());
+      if (fresh) {
+        roots.push(fresh);
+        this._appRoot = fresh;
+      }
+      if (this._appRoot && this._appRoot !== fresh) roots.push(this._appRoot);
+      for (const root of roots) {
+        const stack = [root];
+        const seen = /* @__PURE__ */ new Set();
+        while (stack.length) {
+          const comp = stack.pop();
+          if (!comp || seen.has(comp)) continue;
+          seen.add(comp);
+          if (!comp._destroyed && typeof comp.showCommandPalette === "function") return comp;
+          if (comp.children) for (const ch of comp.children) stack.push(ch);
+          if (comp.sideBar) stack.push(comp.sideBar);
+        }
+      }
+      return null;
+    }
     // Locate the LIVE native palette component for an open .cmdpal--dialog. Its DOM
     // node has no back-reference to its component, so we DFS the component tree from
     // a root climbed fresh from g_focusedComponent (the just-opened palette is the
@@ -526,8 +552,12 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
     }
     // Ensure a single veiled native command palette is open and populated, stored on
     // this._nativePal. Idempotent — reused across renders and executions in a session.
-    // ONE synthetic ⌘P (Thymer ignores isTrusted); if a stray palette is already open
-    // we destroy it first so our ⌘P opens fresh rather than toggling it closed.
+    // Opened by calling the sidebar's showCommandPalette() directly (the app's own
+    // launch_cmdpal handler), NOT by synthesizing the shortcut — a synthetic ⌘P stops
+    // working the moment the user remaps the native palette via custom keyboard
+    // shortcuts. Synthetic ⌘P remains only as a fallback if the sidebar isn't found.
+    // If a stray palette is already open we destroy it first so our open call opens
+    // fresh rather than toggling it closed.
     async _ensureNativePal() {
       if (this._nativeAC()) return this._nativePal;
       this._nativePal = null;
@@ -537,15 +567,23 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       }
       if (!this._overlayOrOpening()) return null;
       this._setVeil(true);
-      document.body.dispatchEvent(new KeyboardEvent("keydown", {
-        key: "p",
-        code: "KeyP",
-        keyCode: 80,
-        which: 80,
-        metaKey: true,
-        bubbles: true,
-        cancelable: true
-      }));
+      const sidebar = this._findSidebar();
+      if (sidebar) {
+        try {
+          sidebar.showCommandPalette();
+        } catch (e) {
+        }
+      } else {
+        document.body.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "p",
+          code: "KeyP",
+          keyCode: 80,
+          which: 80,
+          metaKey: true,
+          bubbles: true,
+          cancelable: true
+        }));
+      }
       const deadline = Date.now() + 1500;
       while (Date.now() < deadline) {
         if (!this._overlayOrOpening()) {
