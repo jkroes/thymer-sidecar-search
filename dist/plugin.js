@@ -59,44 +59,23 @@ var plugins = (() => {
 .scs-footer{padding:10px;font-size:11px;color:var(--scs-fg,color(display-p3 0.769 0.769 0.769));
   border-top:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between;}
 .scs-empty{padding:18px;text-align:center;font-size:14px;opacity:.6;}
-/* > command mode extras (metrics probed from the native classes at open; the literals
-   are fallbacks): 5px divider slots, 30px labeled heading rows, the settings user
-   card, and shortcut text. */
-.scs-cdiv{height:var(--scs-cdiv-height,5px);margin:var(--scs-cdiv-margin,0 10px 0 5px);
-  border-top:var(--scs-cdiv-border,1px solid rgba(255,255,255,.08));box-sizing:border-box;}
-.scs-chdr{display:flex;align-items:center;gap:8px;margin:0 5px;
-  padding:var(--scs-chdr-padding,5px 10px);font-size:var(--scs-chdr-fontsize,12px);
-  color:var(--scs-chdr-color,inherit);opacity:var(--scs-chdr-opacity,.55);
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.scs-chtml{margin:0 5px;}
-.scs-ckbd{flex:none;font-size:var(--scs-kbd-fontsize,14px);
-  color:var(--scs-kbd-color,inherit);opacity:var(--scs-kbd-opacity,.6);white-space:nowrap;}
-/* Native "No results" is a non-selectable row with the normal option layout
-   (empty icon slot + left-aligned label), not a dimmed/centered message. */
-.scs-noresults{display:flex;align-items:center;gap:8px;padding:5px 10px;
-  margin:0 5px;font-size:14px;cursor:default;}
-.scs-noresults .scs-icon{flex:none;min-width:16px;}
-.scs-noresults .scs-label{flex:1;}
-/* Veil that hides the native palette while we drive it. opacity:0 (NOT
-   visibility:hidden) is deliberate: a visibility:hidden element can't receive focus,
-   which stops the native palette from focusing its own input on open \u2014 and that
-   focus is what lets us locate its component in ~5ms instead of a ~1s tree-walk.
-   opacity:0 hides it just as completely while keeping it focusable. Scoped under a
-   class on <html> so a crash/unload can't leave the app veiled (removed in onUnload). */
+/* Veil that hides a native palette during the destroy-and-replace swap so it can't
+   paint a frame of native jump results. opacity:0 (NOT visibility:hidden) keeps the
+   element focusable \u2014 the palette's self-focus is what our focusin discovery and
+   fast component lookup rely on. Scoped under a class on <html> so a crash/unload
+   can't leave the app veiled (removed in onUnload). */
 html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !important;}
 `;
   var MAX_RESULTS = 40;
   var SEARCH_LIMIT = 100;
   var DEBOUNCE_MS = 120;
   var JUMP_PLACEHOLDER = "Search a doc name, date, user, or command...";
-  var CMD_PLACEHOLDER = "Search a command...";
   var VEIL_CLASS = "scs-cmdveil";
-  var NATIVE_FOLLOWUP_WAIT_MS = 180;
   var DYN_ALLOW_LIMIT = 500;
   var CREATE_POLL_MS = 50;
   var CREATE_POLL_TRIES = 160;
+  var ESCAPE_HATCH_MS = 400;
   var DEFAULT_JUMP_SHORTCUT = "Mod+K";
-  var DEFAULT_CMD_SHORTCUT = "Mod+P";
   var IS_MAC = /mac|ip(hone|ad|od)/i.test(
     navigator.userAgentData && navigator.userAgentData.platform || navigator["platform"] || ""
   );
@@ -119,14 +98,19 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       this._recCol = /* @__PURE__ */ new Map();
       this._dynAllowRecs = /* @__PURE__ */ new Set();
       this._dynAllowCols = /* @__PURE__ */ new Set();
-      this._nativePal = null;
       this._appRoot = null;
-      this._opening = false;
+      this._nativeJumpTs = 0;
+      this._palInput = null;
+      this._palDlg = null;
+      this._palKeyFn = null;
+      this._palClickFn = null;
+      this._exemptDlgs = /* @__PURE__ */ new WeakSet();
       const cust = (this.getConfiguration() || {}).custom || {};
       this._jumpHotkey = this._parseShortcut(cust.jumpShortcut) || this._parseShortcut(DEFAULT_JUMP_SHORTCUT);
-      this._cmdHotkey = this._parseShortcut(cust.commandShortcut) || this._parseShortcut(DEFAULT_CMD_SHORTCUT);
       this._keyHandler = (e) => this._onGlobalKey(e);
       window.addEventListener("keydown", this._keyHandler, true);
+      this._focusHandler = (e) => this._onFocusIn(e);
+      window.addEventListener("focusin", this._focusHandler, true);
       this.ui.addCommandPaletteCommand({
         label: "Sidecar Search: open",
         icon: "search",
@@ -136,8 +120,10 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
     }
     onUnload() {
       this._close();
+      this._detachPalInterceptor();
       document.documentElement.classList.remove(VEIL_CLASS);
       window.removeEventListener("keydown", this._keyHandler, true);
+      window.removeEventListener("focusin", this._focusHandler, true);
     }
     // ---------- global keyboard ----------
     // "Mod+Shift+K" → exact modifier flags + key, or null if unusable. "Mod" = Cmd on
@@ -173,27 +159,17 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
     }
     _onGlobalKey(e) {
       if (!e.isTrusted) return;
-      const key = (e.key || "").toLowerCase();
-      const isJump = this._matchesHotkey(e, this._jumpHotkey);
-      const isCmdMode = !isJump && this._matchesHotkey(e, this._cmdHotkey);
-      if (isJump || isCmdMode) {
+      if (this._matchesHotkey(e, this._jumpHotkey)) {
         if (!this._overlay && document.querySelector(".cmdpal--dialog")) return;
         e.preventDefault();
         e.stopImmediatePropagation();
         e.stopPropagation();
-        const inCmd = this._level.mode === "cmd-root" || this._level.mode === "cmd-cat";
-        if (isJump) {
-          if (!this._overlay) this._open();
-          else if (inCmd) this._switchToJumpMode();
-          else this._close();
-        } else {
-          if (!this._overlay) this._open("commands");
-          else if (inCmd) this._close();
-          else this._switchToCommandMode("");
-        }
+        if (this._overlay) this._close();
+        else this._open();
         return;
       }
-      if (this._overlay && key === "escape") {
+      if (e.metaKey || e.ctrlKey) this._nativeJumpTs = Date.now();
+      if (this._overlay && (e.key || "").toLowerCase() === "escape") {
         e.preventDefault();
         e.stopImmediatePropagation();
         e.stopPropagation();
@@ -201,17 +177,135 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       }
     }
     _back() {
-      if (this._level.mode === "cmd-cat") {
-        this._level = { mode: "cmd-root" };
-        if (this._input) this._input.value = "";
-        this._render();
-      } else if (this._level.mode === "root" || this._level.mode === "cmd-root") {
+      if (this._level.mode === "root") {
         this._close();
       } else {
         this._level = { mode: "root" };
         if (this._input) this._input.value = "";
         this._render();
       }
+    }
+    // ---------- native palette discovery & redirection ----------
+    // Fires for EVERY native palette open (it always focuses its own input), no
+    // matter the entry path: shortcut fallthrough, sidebar/statusbar "Jump To"
+    // buttons, mobile swipe, hint-row click. The single replacement mechanism.
+    _onFocusIn(e) {
+      const input = e.target;
+      if (!input || !input.classList || !input.classList.contains("cmdpal--input")) return;
+      const dlg = input.closest ? input.closest(".cmdpal--dialog") : null;
+      if (!dlg) return;
+      if (this._overlay && this._overlay.contains(dlg)) return;
+      queueMicrotask(() => {
+        if (!input.isConnected) return;
+        const pal = this._findPalComp(dlg);
+        if (!pal || pal._destroyed) return;
+        if (pal.searchType === "JUMP") {
+          if (this._exemptDlgs.has(dlg) || Date.now() - this._nativeJumpTs < ESCAPE_HATCH_MS) {
+            this._exemptDlgs.add(dlg);
+            if (this._overlay) this._close();
+            return;
+          }
+          this._swapFromNative(pal, input.value || "");
+        } else if (pal.searchType === "COMMANDS") {
+          this._attachPalInterceptor(input, dlg, pal);
+        }
+      });
+    }
+    // Capture listeners on the live native COMMAND palette: swap to our jump palette
+    // on the transitions native would otherwise handle itself.
+    _attachPalInterceptor(input, dlg, pal) {
+      if (this._palInput === input) return;
+      this._detachPalInterceptor();
+      const keyFn = /* @__PURE__ */ __name((e) => this._onPalKey(e, input, pal), "keyFn");
+      const clickFn = /* @__PURE__ */ __name(() => setTimeout(() => {
+        if (pal._destroyed || !pal.node || !pal.node.isConnected) return;
+        if (pal.searchType === "JUMP") {
+          this._swapFromNative(pal, input.isConnected && input.value || "");
+        }
+      }, 0), "clickFn");
+      input.addEventListener("keydown", keyFn, true);
+      dlg.addEventListener("click", clickFn, true);
+      this._palInput = input;
+      this._palDlg = dlg;
+      this._palKeyFn = keyFn;
+      this._palClickFn = clickFn;
+    }
+    _detachPalInterceptor() {
+      if (this._palInput && this._palKeyFn) {
+        this._palInput.removeEventListener("keydown", this._palKeyFn, true);
+      }
+      if (this._palDlg && this._palClickFn) {
+        this._palDlg.removeEventListener("click", this._palClickFn, true);
+      }
+      this._palInput = null;
+      this._palDlg = null;
+      this._palKeyFn = null;
+      this._palClickFn = null;
+    }
+    _onPalKey(e, input, pal) {
+      if (!e.isTrusted) return;
+      if (!input.isConnected || pal._destroyed) {
+        this._detachPalInterceptor();
+        return;
+      }
+      if (pal.searchType !== "COMMANDS") {
+        this._exemptDlgs.add(pal.node);
+        return;
+      }
+      if (this._matchesHotkey(e, this._jumpHotkey)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        this._swapFromNative(pal, "");
+        return;
+      }
+      if (e.key === "@" && !e.metaKey && !e.ctrlKey && !e.altKey && !input.value) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        this._swapFromNative(pal, "");
+      }
+    }
+    // Destroy a live native jump palette and open ours in its place, carrying any
+    // typed query. Veiled during the swap so native can't paint a frame of results.
+    _swapFromNative(pal, rawValue) {
+      this._detachPalInterceptor();
+      this._setVeil(true);
+      try {
+        this._destroyPal(pal);
+      } finally {
+        this._setVeil(false);
+      }
+      const prefill = String(rawValue || "").replace(/^[@>]/, "").trim();
+      if (this._overlay) {
+        if (this._input) this._input.focus();
+        return;
+      }
+      this._open();
+      if (prefill && this._input) {
+        this._input.value = prefill;
+        this._render();
+      }
+    }
+    // Typing ">" in our palette is the reverse handoff: commands live in the native
+    // palette now, so close ours and open the real thing, carrying the remainder.
+    _handoffToNativeCommands(query) {
+      this._close();
+      const sidebar = this._findSidebar();
+      if (!sidebar) return;
+      try {
+        sidebar.showCommandPalette();
+      } catch (e) {
+        return;
+      }
+      if (!query) return;
+      setTimeout(() => {
+        const dlg = document.querySelector(".cmdpal--dialog");
+        const inp = dlg && dlg.querySelector(".cmdpal--input");
+        if (!inp) return;
+        inp.value = query;
+        inp.dispatchEvent(new Event("input", { bubbles: true }));
+      }, 30);
     }
     // ---------- data ----------
     async _refreshCollections() {
@@ -288,23 +382,13 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       return this._cols.filter((c) => !c.isJournal && !c.isDynamic);
     }
     // ---------- open/close ----------
-    _open(mode) {
-      if (this._overlay || this._opening) return;
+    _open() {
+      if (this._overlay) return;
       this._prevFocus = document.activeElement;
       this._cacheAppRoot();
-      this._level = { mode: mode === "commands" ? "cmd-root" : "root" };
+      this._level = { mode: "root" };
       this._searchRecs = [];
       this._refreshCollections();
-      if (mode === "commands") {
-        this._opening = true;
-        this._ensureNativePal().then(() => {
-          this._opening = false;
-          if (this._overlay && (this._level.mode === "cmd-root" || this._level.mode === "cmd-cat")) {
-            this._render();
-            if (this._input) this._input.focus();
-          }
-        });
-      }
       const backdrop = document.createElement("div");
       backdrop.className = "scs-backdrop";
       backdrop.addEventListener("mousedown", (e) => {
@@ -328,11 +412,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       this._input.placeholder = JUMP_PLACEHOLDER;
       this._input.addEventListener("input", () => {
         if (this._level.mode === "root" && this._input.value.startsWith(">")) {
-          this._switchToCommandMode(this._input.value.slice(1));
-          return;
-        }
-        if (this._level.mode === "cmd-root" || this._level.mode === "cmd-cat") {
-          this._render();
+          this._handoffToNativeCommands(this._input.value.slice(1));
           return;
         }
         clearTimeout(this._debounce);
@@ -346,7 +426,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       this._list.className = "scs-list";
       this._footer = document.createElement("div");
       this._footer.className = "scs-footer";
-      this._footer.textContent = "\u2191\u2193 Navigate \xB7 \u21B5 Select \xB7 \u21E7\u21B5 Use other panel \xB7 Esc Back/Close \xB7 \u2318\u21E7P Native palette";
+      this._footer.textContent = "\u2191\u2193 Navigate \xB7 \u21B5 Select \xB7 \u21E7\u21B5 Use other panel \xB7 Esc Back/Close \xB7 > Commands";
       palette.appendChild(inputRow);
       palette.appendChild(this._list);
       palette.appendChild(this._footer);
@@ -365,7 +445,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
     _readThemeColors() {
       const box = document.createElement("div");
       box.style.cssText = "position:fixed;left:-9999px;top:0;visibility:hidden;pointer-events:none;";
-      box.innerHTML = '<div class="cmdpal--dialog"><div class="cmdpal--ac-container"><div class="autocomplete--option autocomplete--option-selected"><span class="autocomplete--option-label"><span class="autocomplete--hilite">x</span></span><span class="autocomplete--option-right"><span class="autocomplete--kbd"><span class="kbdmod kbdmod-mac">\u2318</span>K</span></span></div><div class="autocomplete--divider autocomplete--empty"></div><div class="autocomplete-divider-heading autocomplete--empty"><span class="autocomplete--option-label">x</span></div></div></div>';
+      box.innerHTML = '<div class="cmdpal--dialog"><div class="cmdpal--ac-container"><div class="autocomplete--option autocomplete--option-selected"><span class="autocomplete--option-label"><span class="autocomplete--hilite">x</span></span></div></div></div>';
       document.body.appendChild(box);
       const out = {};
       try {
@@ -393,35 +473,12 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
           put("--scs-hilite", hil.color);
           if (hil.fontWeight) out["--scs-hilite-weight"] = hil.fontWeight;
         }
-        const cdiv = cs(".autocomplete--divider");
-        if (cdiv) {
-          if (cdiv.height) out["--scs-cdiv-height"] = cdiv.height;
-          if (cdiv.margin) out["--scs-cdiv-margin"] = cdiv.margin;
-          if (cdiv.borderTopWidth && cdiv.borderTopWidth !== "0px") {
-            out["--scs-cdiv-border"] = `${cdiv.borderTopWidth} ${cdiv.borderTopStyle} ${cdiv.borderTopColor}`;
-          }
-        }
-        const chdr = cs(".autocomplete-divider-heading");
-        if (chdr) {
-          put("--scs-chdr-color", chdr.color);
-          if (chdr.fontSize) out["--scs-chdr-fontsize"] = chdr.fontSize;
-          if (chdr.padding) out["--scs-chdr-padding"] = chdr.padding;
-          if (chdr.opacity) out["--scs-chdr-opacity"] = chdr.opacity;
-        }
-        const ckbd = cs(".autocomplete--kbd");
-        if (ckbd) {
-          put("--scs-kbd-color", ckbd.color);
-          if (ckbd.fontSize) out["--scs-kbd-fontsize"] = ckbd.fontSize;
-          if (ckbd.opacity) out["--scs-kbd-opacity"] = ckbd.opacity;
-        }
       } catch (e) {
       }
       box.remove();
       return out;
     }
-    _close(opts) {
-      const keepNative = !!(opts && opts.keepNative);
-      this._opening = false;
+    _close() {
       clearTimeout(this._debounce);
       this._searchToken++;
       if (this._overlay) {
@@ -436,11 +493,6 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       this._rows = [];
       const prev = this._prevFocus;
       this._prevFocus = null;
-      this._opening = false;
-      if (keepNative) return;
-      if (this._nativePal || document.documentElement.classList.contains(VEIL_CLASS)) {
-        this._teardownNativePal();
-      }
       if (prev && prev.isConnected) {
         try {
           prev.focus();
@@ -448,17 +500,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
         }
       }
     }
-    // ---------- command-mode backend (one kept-alive native palette per session) ----
-    //
-    // The command catalog only lives inside a native-palette instance, which the app
-    // assembles from the current editor/panel context at open (~10 ms to populate) —
-    // reading it requires a real, open palette. We open ONE veiled native palette when
-    // command mode is entered and keep it alive for the whole session: rendering reads
-    // its live staticOptions/categoryFilters, and executing a command calls its own
-    // confirmOptionEx. On close we destroy it. Learned the hard way (see README.dev):
-    // a SINGLE synthetic ⌘P per session is reliable; repeated ⌘P (retries/toggles)
-    // desync the palette into a wedged empty-catalog state, and node.remove() desyncs
-    // its component — so we open exactly once and only ever destroy() to close.
+    // ---------- native palette plumbing (component tree walk) ----------
     _setVeil(on) {
       document.documentElement.classList.toggle(VEIL_CLASS, !!on);
     }
@@ -508,14 +550,13 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       }
       return null;
     }
-    // Locate the LIVE native palette component for an open .cmdpal--dialog. Its DOM
-    // node has no back-reference to its component, so we DFS the component tree from
-    // a root climbed fresh from g_focusedComponent (the just-opened palette is the
-    // focused component during our flows), falling back to a cached root. Destroyed
-    // components whose nodes linger are skipped.
-    _findNativePal() {
-      const dialogs = [...document.querySelectorAll(".cmdpal--dialog")];
-      if (!dialogs.length) return null;
+    // Locate the LIVE component owning a specific .cmdpal--dialog node. The DOM has
+    // no back-reference to its component, so we DFS the component tree from a root
+    // climbed fresh from g_focusedComponent (a just-opened palette IS the focused
+    // component), falling back to a cached root. Destroyed components whose nodes
+    // linger are skipped. Returns null for non-component markup (our theme probe).
+    _findPalComp(dlgNode) {
+      if (!dlgNode) return null;
       const roots = [];
       const fresh = this._climbRoot(this._gfc());
       if (fresh) {
@@ -525,171 +566,28 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       if (this._appRoot && this._appRoot !== fresh) roots.push(this._appRoot);
       for (const root of roots) {
         const stack = [root];
+        const seen = /* @__PURE__ */ new Set();
         while (stack.length) {
           const comp = stack.pop();
-          if (!comp) continue;
-          if (!comp._destroyed && dialogs.includes(comp.node)) return comp;
+          if (!comp || seen.has(comp)) continue;
+          seen.add(comp);
+          if (!comp._destroyed && comp.node === dlgNode) return comp;
           if (comp.children) for (const ch of comp.children) stack.push(ch);
+          if (comp.sideBar) stack.push(comp.sideBar);
         }
       }
       return null;
     }
-    // Close the native palette by its own destroy() — its Esc/cancel path ignores
+    // Close a native palette by its own destroy() — its Esc/cancel path ignores
     // untrusted key events, and node.remove() desyncs the component (leaving it
-    // "open" so the next ⌘P toggles it closed), so destroy() is the only safe close.
+    // "open" so the next open toggles it closed), so destroy() is the only safe close.
     _destroyPal(pal) {
-      const target = pal || (this._nativePal && !this._nativePal._destroyed ? this._nativePal : null) || this._findNativePal();
-      if (target && !target._destroyed && typeof target.destroy === "function" && target.node && target.node.isConnected) {
+      if (pal && !pal._destroyed && typeof pal.destroy === "function" && pal.node && pal.node.isConnected) {
         try {
-          target.destroy();
+          pal.destroy();
         } catch (e) {
         }
       }
-    }
-    _nativeAC() {
-      const p = this._nativePal;
-      return p && !p._destroyed && p.node && p.node.isConnected && p.autocomplete && (p.autocomplete.staticOptions || []).length ? p.autocomplete : null;
-    }
-    // Ensure a single veiled native command palette is open and populated, stored on
-    // this._nativePal. Idempotent — reused across renders and executions in a session.
-    // Opened by calling the sidebar's showCommandPalette() directly (the app's own
-    // launch_cmdpal handler), NOT by synthesizing the shortcut — a synthetic ⌘P stops
-    // working the moment the user remaps the native palette via custom keyboard
-    // shortcuts. Synthetic ⌘P remains only as a fallback if the sidebar isn't found.
-    // If a stray palette is already open we destroy it first so our open call opens
-    // fresh rather than toggling it closed.
-    async _ensureNativePal() {
-      if (this._nativeAC()) return this._nativePal;
-      this._nativePal = null;
-      for (let i = 0; i < 12 && document.querySelector(".cmdpal--dialog"); i++) {
-        this._destroyPal(this._findNativePal());
-        await new Promise((resolve) => setTimeout(resolve, 15));
-      }
-      if (!this._overlayOrOpening()) return null;
-      this._setVeil(true);
-      const sidebar = this._findSidebar();
-      if (sidebar) {
-        try {
-          sidebar.showCommandPalette();
-        } catch (e) {
-        }
-      } else {
-        document.body.dispatchEvent(new KeyboardEvent("keydown", {
-          key: "p",
-          code: "KeyP",
-          keyCode: 80,
-          which: 80,
-          metaKey: true,
-          bubbles: true,
-          cancelable: true
-        }));
-      }
-      const deadline = Date.now() + 1500;
-      while (Date.now() < deadline) {
-        if (!this._overlayOrOpening()) {
-          this._destroyPal(this._findNativePal());
-          this._setVeil(false);
-          return null;
-        }
-        const pal = this._findNativePal();
-        if (pal && pal.autocomplete && (pal.autocomplete.staticOptions || []).length) {
-          this._nativePal = pal;
-          if (this._input) this._input.focus();
-          return pal;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-      this._destroyPal(this._findNativePal());
-      this._setVeil(false);
-      return null;
-    }
-    _overlayOrOpening() {
-      return !!this._overlay || this._opening;
-    }
-    // Tear down the kept-alive palette and lift the veil (unless a follow-up widget
-    // is being handed to the user, in which case the caller keeps it visible).
-    _teardownNativePal() {
-      const pal = this._nativePal;
-      this._nativePal = null;
-      this._destroyPal(pal);
-      this._setVeil(false);
-    }
-    // Execute a command on the kept-alive palette via its own confirmOptionEx (takes
-    // the option object directly — no query typing, no ac.results race). The option is
-    // matched by field in staticOptions. If the palette is still open ~180 ms after
-    // confirm, the command opened a follow-up widget (theme picker, rename input,
-    // move/new-page picker) — unveil and hand the native dialog to the user.
-    async _execCommand(optSnap, otherPanel) {
-      const prev = this._prevFocus;
-      const pal = this._nativePal;
-      const ac = this._nativeAC();
-      this._close({ keepNative: true });
-      if (!ac || typeof ac.confirmOptionEx !== "function") {
-        this._teardownNativePal();
-        this._restoreFocus(prev);
-        return;
-      }
-      const opt = (ac.staticOptions || []).find((o) => optMatches(o, optSnap));
-      if (!opt) {
-        this._teardownNativePal();
-        this._restoreFocus(prev);
-        return;
-      }
-      try {
-        ac.confirmOptionEx(opt, { shiftKey: !!otherPanel, preventDefault() {
-        }, stopPropagation() {
-        } });
-      } catch (e) {
-        this._teardownNativePal();
-        this._restoreFocus(prev);
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, NATIVE_FOLLOWUP_WAIT_MS));
-      this._nativePal = null;
-      if (pal && pal.node && pal.node.isConnected) {
-        this._setVeil(false);
-        const inp = pal.node.querySelector(".cmdpal--input");
-        if (inp) {
-          try {
-            inp.focus();
-          } catch (e) {
-          }
-        }
-      } else {
-        this._setVeil(false);
-        this._restoreFocus(prev);
-      }
-    }
-    _restoreFocus(prev) {
-      if (prev && prev.isConnected) {
-        try {
-          prev.focus();
-        } catch (e) {
-        }
-      }
-    }
-    // ---------- mode switching (@ ↔ >) ----------
-    _switchToCommandMode(query) {
-      if (!this._overlay) return;
-      this._level = { mode: "cmd-root" };
-      this._input.value = query || "";
-      this._render();
-      if (!this._nativeAC()) {
-        this._opening = true;
-        this._ensureNativePal().then(() => {
-          this._opening = false;
-          if (this._overlay && (this._level.mode === "cmd-root" || this._level.mode === "cmd-cat")) {
-            this._render();
-            if (this._input) this._input.focus();
-          }
-        });
-      }
-    }
-    _switchToJumpMode() {
-      if (!this._overlay) return;
-      this._level = { mode: "root" };
-      this._input.value = "";
-      this._render();
     }
     // ---------- input keys ----------
     _onInputKey(e) {
@@ -702,7 +600,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
         e.preventDefault();
         const row = this._rows[this._sel];
         if (row) row.action({ otherPanel: e.shiftKey });
-      } else if (e.key === "Backspace" && !this._input.value && this._level.mode !== "root" && this._level.mode !== "cmd-root" && this._level.mode !== "cmd-cat") {
+      } else if (e.key === "Backspace" && !this._input.value && this._level.mode !== "root") {
         e.preventDefault();
         this._back();
       }
@@ -731,41 +629,16 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       this._renderList(q);
     }
     _renderList(q) {
-      const isCmd = this._level.mode === "cmd-root" || this._level.mode === "cmd-cat";
-      const entries = this._level.mode === "root" ? q ? this._rootQueryEntries(q) : this._rootEmptyEntries() : this._level.mode === "cmd-root" ? q ? this._cmdSearchEntries(q) : this._cmdRootEmptyEntries() : this._level.mode === "cmd-cat" ? this._cmdCatEntries(q) : this._level.mode === "collection" ? this._collectionEntries(q) : this._createPickEntries(q);
-      this._searchtype.textContent = isCmd ? ">" : "@";
-      this._input.placeholder = isCmd ? CMD_PLACEHOLDER : JUMP_PLACEHOLDER;
-      this._footer.style.display = isCmd ? "none" : "";
+      const entries = this._level.mode === "root" ? q ? this._rootQueryEntries(q) : this._rootEmptyEntries() : this._level.mode === "collection" ? this._collectionEntries(q) : this._createPickEntries(q);
       this._crumb.style.display = this._level.mode === "collection" || this._level.mode === "create-pick" ? "" : "none";
       this._crumb.textContent = this._level.mode === "collection" ? this._level.entry.name + " \u203A" : this._level.mode === "create-pick" ? "New page \u203A" : "";
       this._list.textContent = "";
       this._rows = [];
       let defaultSel = 0;
       for (const entry of entries) {
-        if (entry.divider || entry.divider5) {
+        if (entry.divider) {
           const div = document.createElement("div");
-          div.className = entry.divider5 ? "scs-cdiv" : "scs-divider";
-          this._list.appendChild(div);
-          continue;
-        }
-        if (entry.hdr != null) {
-          const div = document.createElement("div");
-          div.className = "scs-chdr";
-          div.innerHTML = (entry.icon ? `<span class="scs-icon">${iconHTML(entry.icon)}</span>` : "") + `<span>${esc(entry.hdr)}</span>`;
-          this._list.appendChild(div);
-          continue;
-        }
-        if (entry.html != null) {
-          const div = document.createElement("div");
-          div.className = "scs-chtml";
-          div.innerHTML = entry.html;
-          this._list.appendChild(div);
-          continue;
-        }
-        if (entry.static) {
-          const div = document.createElement("div");
-          div.className = "scs-static";
-          div.textContent = entry.static;
+          div.className = "scs-divider";
           this._list.appendChild(div);
           continue;
         }
@@ -779,18 +652,9 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
         this._rows.push(row);
       }
       if (!this._rows.length) {
-        const isCmd2 = this._level.mode === "cmd-root" || this._level.mode === "cmd-cat";
         const empty = document.createElement("div");
-        if (isCmd2 && !this._nativeAC()) {
-          empty.className = "scs-empty";
-          empty.textContent = "";
-        } else if (isCmd2 && q) {
-          empty.className = "scs-noresults";
-          empty.innerHTML = '<span class="scs-icon"></span><span class="scs-label">No results</span>';
-        } else {
-          empty.className = "scs-empty";
-          empty.textContent = q ? "No results" : "Loading\u2026";
-        }
+        empty.className = "scs-empty";
+        empty.textContent = q ? "No results" : "Loading\u2026";
         this._list.appendChild(empty);
       }
       this._select(Math.min(defaultSel, Math.max(0, this._rows.length - 1)));
@@ -798,17 +662,13 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
     _rowEl(row, q) {
       const el = document.createElement("div");
       el.className = "scs-row";
-      const label = row.labelHTML != null ? row.labelHTML : row.indices ? highlightIndices(row.label, row.indices) : row.noHighlight ? esc(row.label) : highlight(row.label, q);
+      const label = row.indices ? highlightIndices(row.label, row.indices) : row.noHighlight ? esc(row.label) : highlight(row.label, q);
       const parts = [
-        // Command rows keep an empty icon slot for alignment (native does the
-        // same); @ rows keep their "·" placeholder.
-        `<span class="scs-icon">${row.icon || !row.blankIcon ? iconHTML(row.icon) : ""}</span>`,
+        `<span class="scs-icon">${iconHTML(row.icon)}</span>`,
         `<span class="scs-label">${label}</span>`
       ];
-      if (row.subHTML) parts.push(`<span class="scs-sub">${row.subHTML}</span>`);
-      else if (row.sub) parts.push(`<span class="scs-sub">${esc(row.sub)}</span>`);
-      if (row.kbdHTML) parts.push(`<span class="scs-ckbd">${row.kbdHTML}</span>`);
-      else if (row.shortcut) parts.push(`<span class="scs-key">${esc(row.shortcut)}</span>`);
+      if (row.sub) parts.push(`<span class="scs-sub">${esc(row.sub)}</span>`);
+      if (row.shortcut) parts.push(`<span class="scs-key">${esc(row.shortcut)}</span>`);
       if (row.arrow) parts.push(`<span class="scs-arrow">\u2192</span>`);
       el.innerHTML = parts.join("");
       return el;
@@ -819,9 +679,8 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       entries.push({
         label: "Press > to filter commands only...",
         icon: "ti-chevron-right",
-        shortcut: "\u2318P",
         noHighlight: true,
-        action: /* @__PURE__ */ __name(() => this._switchToCommandMode(""), "action")
+        action: /* @__PURE__ */ __name(() => this._handoffToNativeCommands(""), "action")
       });
       entries.push({ divider: true });
       for (const c of this._cols) {
@@ -1070,152 +929,6 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       }
       this._render();
     }
-    // ---------- > command mode entries (rendered from the live native palette) ------
-    // The kept-alive palette's catalog, shaped like the old snapshot ({filters,
-    // options}) so the render code below is unchanged. Null until the palette opens.
-    _liveCat() {
-      const ac = this._nativeAC();
-      if (!ac) return null;
-      return { filters: ac.categoryFilters || [], options: ac.staticOptions || [] };
-    }
-    // Root, empty query: category rows (with their dividers) in filter order, then
-    // every option whose category has no submenu filter (the flat insert/edit
-    // sections), in catalog order, rendering headings and dividers.
-    _cmdRootEmptyEntries() {
-      const cat = this._liveCat();
-      if (!cat) return [];
-      const entries = [];
-      const catValues = /* @__PURE__ */ new Set();
-      for (const f of cat.filters || []) {
-        if (f.type === ":cat:div") {
-          entries.push({ divider5: true });
-          continue;
-        }
-        if (f.type !== ":cat") continue;
-        catValues.add(f.value);
-        entries.push(this._cmdCatRow(f, null));
-      }
-      for (const o of cat.options || []) {
-        if (o.category && catValues.has(o.category)) continue;
-        if (o.showOnlyWhenSearching) continue;
-        const entry = this._cmdOptEntry(o, null);
-        if (entry) entries.push(entry);
-      }
-      return entries;
-    }
-    // Search: the native pipeline, run with the app's own fuzzysort — category rows
-    // matched on [label, tag] and kept in front; options matched on
-    // [label, tag, _normalizedLabel] with per-option scoreFactor; weak matches
-    // (score < -60000) dropped; equal scores tie-broken alphabetically.
-    _cmdSearchEntries(q) {
-      const cat = this._liveCat();
-      const fz = appFuzzysort();
-      if (!cat || !fz) return [];
-      const filters = (cat.filters || []).filter((f) => f.type === ":cat");
-      const catRes = fz.go(q, filters, { keys: ["label", "tag"] });
-      const opts = (cat.options || []).filter((o) => !o.pinned);
-      const optRes = fz.go(q, opts, {
-        keys: ["label", "tag", "_normalizedLabel"],
-        scoreFn: cmdScoreFn
-      }).filter(cmdScoreCutoff);
-      const all = [...catRes, ...optRes];
-      all.sort((a, b) => a.score !== b.score ? 0 : normLabel(a.obj && a.obj.label).localeCompare(normLabel(b.obj && b.obj.label)));
-      const entries = [];
-      for (const r of all) {
-        const o = r.obj;
-        if (!o) continue;
-        if (o.type === ":cat") {
-          entries.push(this._cmdCatRow(o, r));
-          continue;
-        }
-        if (o.hideWhenSearching || o.type === ":hdr") continue;
-        const entry = this._cmdOptEntry(o, r);
-        if (entry && entry.action) entries.push(entry);
-      }
-      for (const o of (cat.options || []).filter((x) => x.pinned).reverse()) {
-        const entry = this._cmdOptEntry(o, null);
-        if (entry) entries.unshift(entry);
-      }
-      return entries;
-    }
-    // Category submenu: "← Back" (selectable, like native), optional hint, then the
-    // category's options — catalog order when browsing, fuzzysort-ranked when typing.
-    _cmdCatEntries(q) {
-      const cat = this._liveCat();
-      if (!cat) return [];
-      const filter = this._level.filter;
-      const entries = [{
-        label: "\u2190 Back",
-        noHighlight: true,
-        blankIcon: true,
-        action: /* @__PURE__ */ __name(() => this._back(), "action")
-      }];
-      if (filter.hint) entries.push({ static: filter.hint });
-      const opts = (cat.options || []).filter((o) => o.category === filter.value);
-      if (!q) {
-        for (const o of opts) {
-          if (o.showOnlyWhenSearching) continue;
-          const entry = this._cmdOptEntry(o, null);
-          if (entry) entries.push(entry);
-        }
-      } else {
-        const fz = appFuzzysort();
-        if (!fz) return entries;
-        const res = fz.go(q, opts.filter((o) => !o.pinned), {
-          keys: ["label", "tag", "_normalizedLabel"],
-          scoreFn: cmdScoreFn
-        }).filter(cmdScoreCutoff);
-        res.sort((a, b) => a.score !== b.score ? 0 : normLabel(a.obj && a.obj.label).localeCompare(normLabel(b.obj && b.obj.label)));
-        for (const r of res) {
-          const o = r.obj;
-          if (!o || o.hideWhenSearching || o.type === ":hdr") continue;
-          const entry = this._cmdOptEntry(o, r);
-          if (entry && entry.action) entries.push(entry);
-        }
-      }
-      const first = entries.find((en) => en.action && en.label !== "\u2190 Back");
-      if (first) first.defaultSel = true;
-      return entries;
-    }
-    _cmdCatRow(f, result) {
-      const isJumpHint = f.value === "searchtype_JUMP";
-      return {
-        label: f.label,
-        labelHTML: result ? fzHighlightKey(result[0], f.label) : esc(f.label),
-        icon: f.icon || null,
-        blankIcon: true,
-        arrow: true,
-        kbdHTML: f.kbd ? kbdHTML(f.kbd) : null,
-        action: /* @__PURE__ */ __name(() => {
-          if (isJumpHint) {
-            this._switchToJumpMode();
-            return;
-          }
-          this._level = { mode: "cmd-cat", filter: f };
-          this._input.value = "";
-          this._render();
-        }, "action")
-      };
-    }
-    // One catalog option → one entry. Headings/dividers/HTML headers render as
-    // non-selectable chrome; everything else is an executable command row.
-    _cmdOptEntry(o, result) {
-      if (o.type === ":div") return { divider5: true };
-      if (o.type === ":hdr") return { hdr: o.label || "", icon: o.icon || null };
-      if (o.type === ":html:hdr") return { html: o.htmlHeader && o.htmlHeader.html || "" };
-      if (o.type) return null;
-      const showTag = !o.hideTag && o.tag && result && result[1] && result[1].score != null;
-      return {
-        cmdOpt: o,
-        label: o.label || "",
-        labelHTML: result ? fzHighlightKey(result[0], o.label || "") : esc(o.label || ""),
-        icon: o.icon || null,
-        blankIcon: true,
-        subHTML: showTag ? "&gt;" + fzHighlightKey(result[1], o.tag) : null,
-        kbdHTML: o.kbd ? kbdHTML(o.kbd) : null,
-        action: /* @__PURE__ */ __name((opts) => this._execCommand(o, opts && opts.otherPanel), "action")
-      };
-    }
     // ---------- actions ----------
     async _targetPanel(otherPanel) {
       const panels = (this.ui.getPanels() || []).filter((p) => !p.isSidebar());
@@ -1388,66 +1101,6 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
     return esc(icon);
   }
   __name(iconHTML, "iconHTML");
-  function optMatches(a, b) {
-    if (!a || !b) return false;
-    return (a.value || "") === (b.value || "") && (a.label || "") === (b.label || "") && (a.category || "") === (b.category || "") && JSON.stringify(a.json || null) === JSON.stringify(b.json || null);
-  }
-  __name(optMatches, "optMatches");
-  function appFuzzysort() {
-    const fz = window.fuzzysort || window._fuzzysort;
-    return fz && typeof fz.go === "function" ? fz : null;
-  }
-  __name(appFuzzysort, "appFuzzysort");
-  function cmdScoreFn(keyResults) {
-    let best = -Infinity;
-    for (let i = 0; i < keyResults.length; i++) {
-      const r = keyResults[i];
-      if (!r) continue;
-      let s = r.score == null ? -Infinity : r.score;
-      const factor = keyResults.obj && keyResults.obj.scoreFactor;
-      if (factor) s = (s || 0) * (1 / factor);
-      if (s > best) best = s;
-    }
-    return best === -Infinity ? null : best;
-  }
-  __name(cmdScoreFn, "cmdScoreFn");
-  function cmdScoreCutoff(r) {
-    if (r[0] && r[0].score && r[0].score < -6e4) return false;
-    if (typeof r.score === "number" && r.score && r.score < -6e4) return false;
-    return true;
-  }
-  __name(cmdScoreCutoff, "cmdScoreCutoff");
-  function normLabel(s) {
-    if (!s || typeof s !== "string") return "";
-    try {
-      return s.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase();
-    } catch (e) {
-      return s.toLowerCase();
-    }
-  }
-  __name(normLabel, "normLabel");
-  function fzHighlightKey(keyResult, label) {
-    const fz = appFuzzysort();
-    if (!fz || !keyResult || keyResult.score == null) return esc(label);
-    let h = null;
-    try {
-      h = fz.highlight(keyResult, "", "");
-    } catch (e) {
-    }
-    if (!h) return esc(label);
-    return esc(h).split("").join("<mark>").split("").join("</mark>");
-  }
-  __name(fzHighlightKey, "fzHighlightKey");
-  var KBD_GLYPHS = /* @__PURE__ */ new Set(["\u232B", "\u2326", "\u21B5", "\u21E7", "\u2303", "\u2325", "\u2318", "\u2192", "\u2190", "\u2191", "\u2193", "\u21E5"]);
-  function kbdHTML(kbd) {
-    if (kbd && typeof kbd === "object") return kbd.safeHtml || "";
-    let out = "";
-    for (const ch of String(kbd || "")) {
-      out += KBD_GLYPHS.has(ch) ? `<span class="kbdmod kbdmod-mac">${esc(ch)}</span>` : esc(ch);
-    }
-    return out;
-  }
-  __name(kbdHTML, "kbdHTML");
   function safeIcon(record) {
     try {
       return record.getIcon ? record.getIcon(false) : null;

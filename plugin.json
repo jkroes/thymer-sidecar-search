@@ -2,10 +2,9 @@
   "ver": 1,
   "name": "Sidecar Search",
   "icon": "search",
-  "version": "3.1.2",
-  "description": "Cmd-K + Cmd-P replacement popup with native-palette parity: fuzzy-ranked search over collections (incl. hidden), views, pages; inline New/Open/Settings/Create rows; per-collection sub-palette; date jump rows; full > command mode (catalog + ranking read live from the native palette); Shift+Enter opens in other panel. Native palette stays on Cmd+Shift+P. Rebind via custom.jumpShortcut / custom.commandShortcut below (Mod = Cmd on macOS, Ctrl elsewhere; e.g. \"Mod+Shift+K\").",
+  "version": "4.0.0",
+  "description": "Cmd-K replacement popup: fuzzy-ranked search over collections (incl. hidden), views, pages; inline New/Open/Settings/Create rows; per-collection sub-palette; date jump rows; Shift+Enter opens in other panel. Every native jump-palette open (buttons, swipe) is redirected here; commands stay in the native Cmd-P palette (type > to hand off). Escape hatch: the native jump-palette shortcut (default Cmd+Shift+P) opens true-native jump for the Tags pseudo-collection. Rebind via custom.jumpShortcut below (Mod = Cmd on macOS, Ctrl elsewhere; e.g. \"Mod+Shift+K\").",
   "custom": {
-    "jumpShortcut": "Mod+K",
-    "commandShortcut": "Mod+P"
+    "jumpShortcut": "Mod+K"
   }
 }
