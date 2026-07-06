@@ -29,6 +29,8 @@
 //   - Typing ">" in OUR palette hands off the other way: close ours, open the native
 //     command palette via the sidebar component's showCommandPalette() (the app's own
 //     launch_cmdpal handler, duck-typed tree walk — immune to shortcut remaps).
+//     v4.1: the command-palette shortcut (custom.commandShortcut, default Mod+P)
+//     pressed inside our palette does the same — palette switching is symmetric.
 //
 // Shortcut model:
 // - jumpShortcut is user-configurable via the plugin Configuration tab
@@ -124,6 +126,11 @@ const ESCAPE_HATCH_MS = 400;
 // macOS, Ctrl elsewhere. A binding must include Cmd/Ctrl or Alt so a bad config can't
 // hijack plain typing; anything unparseable falls back to this default.
 const DEFAULT_JUMP_SHORTCUT = "Mod+K";
+// Pressing the native command palette's binding INSIDE our palette hands off to
+// native commands — the mirror of pressing jumpShortcut inside the native palette.
+// We can't read the app's launch_cmdpal binding, so this is its own config knob
+// ("custom": {"commandShortcut": ...}); keep it in sync with any native remap.
+const DEFAULT_COMMAND_SHORTCUT = "Mod+P";
 // Case-insensitive: userAgentData.platform is "macOS" (lowercase m), navigator.platform
 // is "MacIntel". navigator.platform is deprecated but the only signal on Safari/Firefox.
 const IS_MAC = /mac|ip(hone|ad|od)/i.test(
@@ -157,6 +164,8 @@ export class Plugin extends AppPlugin {
         const cust = (this.getConfiguration() || {}).custom || {};
         this._jumpHotkey = this._parseShortcut(cust.jumpShortcut) ||
             this._parseShortcut(DEFAULT_JUMP_SHORTCUT);
+        this._cmdHotkey = this._parseShortcut(cust.commandShortcut) ||
+            this._parseShortcut(DEFAULT_COMMAND_SHORTCUT);
 
         this._keyHandler = (e) => this._onGlobalKey(e);
         window.addEventListener("keydown", this._keyHandler, true);
@@ -225,6 +234,17 @@ export class Plugin extends AppPlugin {
             e.stopPropagation();
             if (this._overlay) this._close();
             else this._open();
+            return;
+        }
+        // commandShortcut inside OUR palette = switch to native commands — the reverse
+        // of pressing jumpShortcut inside the native command palette. Only while our
+        // palette is open; closed, the app's own binding handles it (and the focusin
+        // hook attaches the interceptor to the palette it opens).
+        if (this._overlay && this._matchesHotkey(e, this._cmdHotkey)) {
+            e.preventDefault();
+            e.stopImmediatePropagation();
+            e.stopPropagation();
+            this._handoffToNativeCommands("");
             return;
         }
         // Any modifier combo we did NOT intercept may be a native jump-palette binding

@@ -7,8 +7,10 @@ search collections whose items are hidden from the native palette
 
 Every way of opening the native jump palette — Cmd-K, the sidebar/statusbar "Jump To"
 buttons, mobile swipe — lands in Sidecar Search instead. Commands stay in the **native
-Cmd-P palette** (type `>` in Sidecar to hand off to it). The native jump-palette
-shortcut (default **Cmd+Shift+P**) is the deliberate escape hatch to true-native jump.
+Cmd-P palette** (type `>` or press Cmd-P in Sidecar to hand off to it). Palette
+switching is symmetric: Cmd-K inside the native command palette swaps to Sidecar, and
+Cmd-P inside Sidecar swaps to native commands. The native jump-palette shortcut
+(default **Cmd+Shift+P**) is the deliberate escape hatch to true-native jump.
 
 ## What it does
 
@@ -57,7 +59,8 @@ pasted). Edit the `custom` block and Save:
 
 ```json
 "custom": {
-  "jumpShortcut": "Mod+K"
+  "jumpShortcut": "Mod+K",
+  "commandShortcut": "Mod+P"
 }
 ```
 
@@ -69,6 +72,10 @@ pasted). Edit the `custom` block and Save:
 - If you bind a combo Thymer already uses, Sidecar Search wins. Native jump palettes
   opened by OTHER shortcuts are redirected here anyway (see escape hatch above for the
   one exception), so there's no key you have to keep free.
+- `commandShortcut` is only used while the Sidecar popup is open: pressing it there
+  closes the popup and opens the native command palette. The plugin can't read what
+  `launch_cmdpal` is bound to, so if you've remapped the native command palette, set
+  `commandShortcut` to match.
 
 ## Build
 

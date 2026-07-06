@@ -76,6 +76,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
   var CREATE_POLL_TRIES = 160;
   var ESCAPE_HATCH_MS = 400;
   var DEFAULT_JUMP_SHORTCUT = "Mod+K";
+  var DEFAULT_COMMAND_SHORTCUT = "Mod+P";
   var IS_MAC = /mac|ip(hone|ad|od)/i.test(
     navigator.userAgentData && navigator.userAgentData.platform || navigator["platform"] || ""
   );
@@ -107,6 +108,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       this._exemptDlgs = /* @__PURE__ */ new WeakSet();
       const cust = (this.getConfiguration() || {}).custom || {};
       this._jumpHotkey = this._parseShortcut(cust.jumpShortcut) || this._parseShortcut(DEFAULT_JUMP_SHORTCUT);
+      this._cmdHotkey = this._parseShortcut(cust.commandShortcut) || this._parseShortcut(DEFAULT_COMMAND_SHORTCUT);
       this._keyHandler = (e) => this._onGlobalKey(e);
       window.addEventListener("keydown", this._keyHandler, true);
       this._focusHandler = (e) => this._onFocusIn(e);
@@ -166,6 +168,13 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
         e.stopPropagation();
         if (this._overlay) this._close();
         else this._open();
+        return;
+      }
+      if (this._overlay && this._matchesHotkey(e, this._cmdHotkey)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        e.stopPropagation();
+        this._handoffToNativeCommands("");
         return;
       }
       if (e.metaKey || e.ctrlKey) this._nativeJumpTs = Date.now();
