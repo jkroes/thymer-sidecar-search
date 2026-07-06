@@ -114,6 +114,20 @@ const CSS = `
 .scs-footer{padding:10px;font-size:11px;color:var(--scs-fg,color(display-p3 0.769 0.769 0.769));
   border-top:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between;}
 .scs-empty{padding:18px;text-align:center;font-size:14px;opacity:.6;}
+/* Inline calendar (clone of native's :wdg-date picker in journal/date contexts). */
+.scs-cal{margin:0 10px 4px 15px;font-size:14px;user-select:none;}
+.scs-cal-head{display:flex;align-items:center;justify-content:space-between;padding:6px 4px;}
+.scs-cal-title{font-weight:700;color:var(--scs-fg-bright,color(display-p3 0.929 0.929 0.929));}
+.scs-cal-btns{display:flex;gap:18px;align-items:center;}
+.scs-cal-btn{cursor:pointer;opacity:.65;padding:0 4px;}
+.scs-cal-btn:hover{opacity:1;}
+.scs-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;row-gap:3px;}
+.scs-cal-dow{opacity:.55;padding:2px 0;}
+.scs-cal-day{cursor:pointer;border-radius:3px;padding:2px 0;}
+.scs-cal-day:hover{background:var(--scs-border,rgba(255,255,255,.1));}
+.scs-cal-day.scs-cal-dim{opacity:.4;}
+.scs-cal-day.scs-cal-hl{background:var(--scs-sel-bg,color(display-p3 0.267 0.514 0.482));
+  color:var(--scs-fg-bright,color(display-p3 0.929 0.929 0.929));opacity:1;}
 /* Veil that hides a native palette during the destroy-and-replace swap so it can't
    paint a frame of native jump results. opacity:0 (NOT visibility:hidden) keeps the
    element focusable — the palette's self-focus is what our focusin discovery and
@@ -808,6 +822,11 @@ export class Plugin extends AppPlugin {
                 this._list.appendChild(div);
                 continue;
             }
+            if (entry.widget) {
+                // Non-selectable inline widget (calendar); skipped by arrow nav.
+                this._list.appendChild(entry.widget());
+                continue;
+            }
             const row = entry;
             row.el = this._rowEl(row, q);
             const index = this._rows.length;
@@ -968,13 +987,19 @@ export class Plugin extends AppPlugin {
         scored.sort((a, b) => a.rank - b.rank || b.score - a.score);
         const entries = scored.slice(0, MAX_RESULTS);
 
-        // Date query → journal jump row on top (native shows calendar + jump row).
-        const dt = parseDate(q);
+        // Date query → calendar + journal jump row on top, like native. A clicked
+        // calendar day retargets the row (native's "OK" flow).
+        const level = this._level;
+        const dt = parseDate(q) || (level.calDate ? wrapDate(level.calDate) : null);
         if (dt) {
-            entries.unshift({
-                label: fmtDate(dt), icon: "ti-calendar-event", noHighlight: true,
-                action: (opts) => this._openJournal(dt, opts),
-            });
+            entries.unshift(
+                { widget: () => this._calendarEl(level, dt.toDate()) },
+                { divider: true },
+                {
+                    label: fmtDate(dt), icon: "ti-calendar-event", noHighlight: true,
+                    shortcut: !parseDate(q) && level.calDate ? "OK" : null,
+                    action: (opts) => this._openJournal(dt, opts),
+                });
         }
 
         // No-match: create actions, like native.
@@ -1048,6 +1073,77 @@ export class Plugin extends AppPlugin {
         return this._fixSubmenuSel(entries, q);
     }
 
+    // ---------- inline calendar (clone of native's :wdg-date) ----------
+
+    // Renders a month grid like native's date-picker widget. Clicking a day does NOT
+    // navigate (native parity): it retargets the date row below the calendar (stored
+    // as level.calDate; the row grows an "OK" chip) — Enter/click on the row opens.
+    // ‹ ○ › page prev / today / next month (level.calMonth). Both live on the level
+    // object, so calendar state dies naturally when leaving the level.
+    _calendarEl(level, selDate) {
+        const today = new Date();
+        const hl = selDate || today;
+        const base = level.calMonth || new Date(hl.getFullYear(), hl.getMonth(), 1);
+        const cal = document.createElement("div");
+        cal.className = "scs-cal";
+
+        const head = document.createElement("div");
+        head.className = "scs-cal-head";
+        const title = document.createElement("span");
+        title.className = "scs-cal-title";
+        title.textContent = base.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+        const btns = document.createElement("span");
+        btns.className = "scs-cal-btns";
+        const mkBtn = (text, toMonth) => {
+            const b = document.createElement("span");
+            b.className = "scs-cal-btn";
+            b.textContent = text;
+            b.addEventListener("click", () => {
+                level.calMonth = toMonth();
+                this._render();
+                if (this._input) this._input.focus();
+            });
+            btns.appendChild(b);
+        };
+        mkBtn("‹", () => new Date(base.getFullYear(), base.getMonth() - 1, 1));
+        mkBtn("○", () => new Date(today.getFullYear(), today.getMonth(), 1));
+        mkBtn("›", () => new Date(base.getFullYear(), base.getMonth() + 1, 1));
+        head.appendChild(title);
+        head.appendChild(btns);
+        cal.appendChild(head);
+
+        const grid = document.createElement("div");
+        grid.className = "scs-cal-grid";
+        for (const d of ["S", "M", "T", "W", "T", "F", "S"]) {
+            const el = document.createElement("span");
+            el.className = "scs-cal-dow";
+            el.textContent = d;
+            grid.appendChild(el);
+        }
+        // 6 rows from the Sunday on-or-before the 1st, like native.
+        const start = new Date(base.getFullYear(), base.getMonth(), 1);
+        start.setDate(1 - start.getDay());
+        const sameDay = (a, b) => a.getFullYear() === b.getFullYear() &&
+            a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+        for (let i = 0; i < 42; i++) {
+            const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
+            const el = document.createElement("span");
+            el.className = "scs-cal-day" +
+                (d.getMonth() !== base.getMonth() ? " scs-cal-dim" : "") +
+                (sameDay(d, hl) ? " scs-cal-hl" : "");
+            el.textContent = String(d.getDate());
+            el.addEventListener("click", () => {
+                level.calDate = d;
+                level.calMonth = new Date(d.getFullYear(), d.getMonth(), 1);
+                this._render();
+                if (this._input) this._input.focus();
+            });
+            grid.appendChild(el);
+        }
+        cal.appendChild(grid);
+        return cal;
+    }
+
     // ---------- collection submenu (native ordering) ----------
 
     _collectionEntries(q) {
@@ -1091,20 +1187,26 @@ export class Plugin extends AppPlugin {
         entries.push(...filter(actions));
 
         if (entry.isJournal) {
-            // Native journal submenu (CDP-observed 2026-07-06): no New row, no items,
-            // and a SELECTABLE date row right after Back — labeled "Try: monday,
-            // 7 days, aug 1" on an empty query but resolving to TODAY, retargeted by
-            // a parsed date query. It's the default selection, so entering the
-            // submenu and pressing Enter opens today's journal. (Native also shows
-            // an inline calendar widget there — not replicated.)
-            const dt = parseDate(q);
+            // Native journal submenu (CDP-observed 2026-07-06): no New row, no items;
+            // after Back comes an inline CALENDAR, a divider, then a SELECTABLE date
+            // row — "Try: monday, 7 days, aug 1" resolves to TODAY; a parsed date
+            // query or a clicked calendar day retargets it (native adds an "OK" chip
+            // for a picked day). It's the default selection, so Journal → Enter
+            // opens today's journal.
+            const level = this._level;
+            const dt = parseDate(q) || (level.calDate ? wrapDate(level.calDate) : null);
+            const picked = !parseDate(q) && !!level.calDate;
             if (dt || !q) {
                 for (const en of entries) en.defaultSel = false;
-                entries.splice(1, 0, {
-                    label: dt ? fmtDate(dt) : "Try: monday, 7 days, aug 1",
-                    icon: "ti-calendar-event", noHighlight: true, defaultSel: true,
-                    action: (opts) => this._openJournal(dt, opts),
-                });
+                entries.splice(1, 0,
+                    { widget: () => this._calendarEl(level, dt ? dt.toDate() : null) },
+                    { divider: true },
+                    {
+                        label: dt ? fmtDate(dt) : "Try: monday, 7 days, aug 1",
+                        icon: "ti-calendar-event", noHighlight: true, defaultSel: true,
+                        shortcut: picked ? "OK" : null,
+                        action: (opts) => this._openJournal(dt, opts),
+                    });
             }
             return this._fixSubmenuSel(entries, q);
         }
@@ -1362,6 +1464,12 @@ function parseDate(q) {
         return (typeof DateTime !== "undefined" && DateTime.parseDateTimeString)
             ? DateTime.parseDateTimeString(q) : null;
     } catch (e) { return null; }
+}
+
+// Duck-typed stand-in for a parsed DateTime: fmtDate and panel.navigateToJournal
+// only ever call .toDate(). Used for calendar-picked plain Dates.
+function wrapDate(d) {
+    return { toDate: () => d };
 }
 
 function fmtDate(dt) {

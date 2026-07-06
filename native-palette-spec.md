@@ -316,9 +316,15 @@ The app's entire keyboard dispatch is ONE window **bubble-phase** keydown listen
 
 ## Journal submenu, exact behavior (CDP-observed 2026-07-06)
 
-Row order: `← Back` → inline calendar widget (`:wdg-date`, not replicated in
-sidecar) → date row → `Open Collection 'Journal'` → `Journal: Collection
+Row order: `← Back` → inline calendar widget (`:wdg-date`; replicated in sidecar
+v5.1) → date row → `Open Collection 'Journal'` → `Journal: Collection
 Settings...`. No New row, no page items.
+
+The calendar's day-click does NOT navigate: the autocomplete's `onDateSelected`
+rewrites the `set_date` row (label = picked date, `kbd: "OK"`, `json.dt` updated)
+and you confirm that row. The widget is inserted automatically whenever the
+results contain a `:date` option — so it also appears at palette ROOT for date
+queries. ‹ ○ › page prev / today / next month.
 
 - The date row (`value: "set_date"`) is ALWAYS present and selectable: on an empty
   query it's labeled "Try: monday, 7 days, aug 1" and carries TODAY's date; a
