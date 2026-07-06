@@ -48,6 +48,26 @@ Thymer plugins are pasted into the app — there's no store yet.
 
 Cmd-K now opens Sidecar Search. Removing/disabling the plugin reverts Cmd-K to native.
 
+## Custom shortcuts
+
+Both bindings are configurable in the **Configuration** field (the `plugin.json` you
+pasted). Edit the `custom` block and Save:
+
+```json
+"custom": {
+  "jumpShortcut": "Mod+K",
+  "commandShortcut": "Mod+P"
+}
+```
+
+- `Mod` means Cmd on macOS and Ctrl on Windows/Linux. Also accepted: `Cmd`/`Meta`,
+  `Ctrl`, `Alt`/`Option`, `Shift`, combined with a letter or digit — e.g.
+  `"Mod+Shift+K"`, `"Ctrl+Alt+P"`.
+- A binding must include Cmd/Ctrl or Alt; invalid or missing values fall back to the
+  defaults above.
+- Moving a binding off Cmd-K/Cmd-P hands that key back to the native palette
+  automatically. If you bind a combo Thymer already uses, Sidecar Search wins.
+
 ## Build
 
 `dist/plugin.js` is committed (that's the pasteable bundle). To rebuild from source:

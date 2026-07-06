@@ -33,8 +33,14 @@
 //     we lift the veil and hand the real native follow-up UI to the user in place.
 //
 // Shortcut model (live-verified via plugins/cmdp-probe, 2026-07-05, web app):
-// - We steal Cmd-K and Cmd-P at window-capture BEFORE Thymer's handler
+// - We steal the jump/command shortcuts at window-capture BEFORE Thymer's handler
 //   (preventDefault + stopImmediatePropagation suppresses the native palette).
+// - Both bindings are user-configurable via the plugin Configuration tab
+//   ("custom": {"jumpShortcut": "Mod+K", "commandShortcut": "Mod+P"}); "Mod" is Cmd
+//   on macOS, Ctrl elsewhere. Unparseable values fall back to the defaults. Moving
+//   a binding off ⌘K/⌘P hands that key back to the native palette automatically
+//   (we simply stop swallowing it). Parsing adapted from parham-shafti/
+//   thymer-reference-extravaganza (MIT).
 // - Cmd+Shift+P is natively an alias of Cmd-K and we deliberately do NOT intercept it,
 //   so it remains the escape hatch to the native palette. While a VISIBLE native
 //   palette is open, we don't intercept anything.
@@ -135,6 +141,15 @@ const DYN_ALLOW_LIMIT = 500; // per dynamic view, when resolving its member reco
 // thymer-sdk-write-read-model) — poll before navigating.
 const CREATE_POLL_MS = 50;
 const CREATE_POLL_TRIES = 160;
+// Configurable global bindings (plugin Configuration tab → "custom"). "Mod" = Cmd on
+// macOS, Ctrl elsewhere. A binding must include Cmd/Ctrl or Alt so a bad config can't
+// hijack plain typing; anything unparseable falls back to these defaults.
+const DEFAULT_JUMP_SHORTCUT = "Mod+K";
+const DEFAULT_CMD_SHORTCUT = "Mod+P";
+const IS_MAC = /Mac|iP(hone|ad|od)/.test(
+    // navigator.platform is deprecated but is the only signal on Safari/Firefox
+    (navigator.userAgentData && navigator.userAgentData.platform) || navigator["platform"] || ""
+);
 
 export class Plugin extends AppPlugin {
     onLoad() {
@@ -156,6 +171,12 @@ export class Plugin extends AppPlugin {
         this._appRoot = null;         // cached app-root component (palette tree walk)
         this._opening = false;        // command-mode open in flight (before overlay)
 
+        const cust = (this.getConfiguration() || {}).custom || {};
+        this._jumpHotkey = this._parseShortcut(cust.jumpShortcut) ||
+            this._parseShortcut(DEFAULT_JUMP_SHORTCUT);
+        this._cmdHotkey = this._parseShortcut(cust.commandShortcut) ||
+            this._parseShortcut(DEFAULT_CMD_SHORTCUT);
+
         this._keyHandler = (e) => this._onGlobalKey(e);
         window.addEventListener("keydown", this._keyHandler, true);
 
@@ -176,12 +197,44 @@ export class Plugin extends AppPlugin {
 
     // ---------- global keyboard ----------
 
+    // "Mod+Shift+K" → exact modifier flags + key, or null if unusable. "Mod" = Cmd on
+    // macOS, Ctrl elsewhere. Adapted from thymer-reference-extravaganza (MIT).
+    _parseShortcut(str) {
+        if (!str || typeof str !== "string") return null;
+        const h = { meta: false, ctrl: false, shift: false, alt: false, key: null, code: null };
+        for (const p of str.split("+").map((s) => s.trim().toLowerCase()).filter(Boolean)) {
+            if (p === "mod") { if (IS_MAC) h.meta = true; else h.ctrl = true; }
+            else if (p === "cmd" || p === "meta" || p === "super" || p === "win") h.meta = true;
+            else if (p === "ctrl" || p === "control") h.ctrl = true;
+            else if (p === "shift") h.shift = true;
+            else if (p === "alt" || p === "option" || p === "opt") h.alt = true;
+            else {
+                if (h.key) return null; // two non-modifier parts
+                h.key = p;
+                if (/^[a-z]$/.test(p)) h.code = "Key" + p.toUpperCase();
+                else if (/^[0-9]$/.test(p)) h.code = "Digit" + p;
+            }
+        }
+        if (!h.key) return null;
+        if (!h.meta && !h.ctrl && !h.alt) return null;
+        return h;
+    }
+
+    // Exact-modifier match; prefer e.code (keyboard-layout-stable) over e.key.
+    _matchesHotkey(e, h) {
+        if (!h) return false;
+        if (!!e.metaKey !== h.meta || !!e.ctrlKey !== h.ctrl ||
+            !!e.altKey !== h.alt || !!e.shiftKey !== h.shift) return false;
+        if (h.code) return e.code === h.code;
+        return (e.key || "").toLowerCase() === h.key;
+    }
+
     _onGlobalKey(e) {
         if (!e.isTrusted) return; // never react to our own synthetic dispatches
         const key = (e.key || "").toLowerCase();
-        const cmd = e.metaKey || e.ctrlKey;
-        const chord = cmd && !e.shiftKey && !e.altKey;
-        if (chord && (key === "k" || key === "p")) {
+        const isJump = this._matchesHotkey(e, this._jumpHotkey);
+        const isCmdMode = !isJump && this._matchesHotkey(e, this._cmdHotkey);
+        if (isJump || isCmdMode) {
             // A VISIBLE native palette (opened via ⌘⇧P, the escape hatch) keeps its
             // own ⌘K/⌘P handling — ours is only for the veiled instance we drive.
             if (!this._overlay && document.querySelector(".cmdpal--dialog")) return;
@@ -189,7 +242,7 @@ export class Plugin extends AppPlugin {
             e.stopImmediatePropagation();
             e.stopPropagation();
             const inCmd = this._level.mode === "cmd-root" || this._level.mode === "cmd-cat";
-            if (key === "k") {
+            if (isJump) {
                 // Native: ⌘K closes an open @ palette, switches a > palette to @.
                 if (!this._overlay) this._open();
                 else if (inCmd) this._switchToJumpMode();

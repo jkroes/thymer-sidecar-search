@@ -2,5 +2,9 @@
   "ver": 1,
   "name": "Sidecar Search",
   "icon": "search",
-  "description": "Cmd-K + Cmd-P replacement popup with native-palette parity: fuzzy-ranked search over collections (incl. hidden), views, pages; inline New/Open/Settings/Create rows; per-collection sub-palette; date jump rows; full > command mode (catalog + ranking read live from the native palette); Shift+Enter opens in other panel. Native palette stays on Cmd+Shift+P."
+  "description": "Cmd-K + Cmd-P replacement popup with native-palette parity: fuzzy-ranked search over collections (incl. hidden), views, pages; inline New/Open/Settings/Create rows; per-collection sub-palette; date jump rows; full > command mode (catalog + ranking read live from the native palette); Shift+Enter opens in other panel. Native palette stays on Cmd+Shift+P. Rebind via custom.jumpShortcut / custom.commandShortcut below (Mod = Cmd on macOS, Ctrl elsewhere; e.g. \"Mod+Shift+K\").",
+  "custom": {
+    "jumpShortcut": "Mod+K",
+    "commandShortcut": "Mod+P"
+  }
 }
