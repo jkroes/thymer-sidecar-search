@@ -694,7 +694,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       el.className = "scs-row";
       const label = row.indices ? highlightIndices(row.label, row.indices) : row.noHighlight ? esc(row.label) : highlight(row.label, q);
       const parts = [
-        `<span class="scs-icon">${iconHTML(row.icon)}</span>`,
+        row.noIcon ? "" : `<span class="scs-icon">${iconHTML(row.icon)}</span>`,
         `<span class="scs-label">${label}</span>`
       ];
       if (row.sub) parts.push(`<span class="scs-sub">${esc(row.sub)}</span>`);
@@ -861,11 +861,12 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       };
     }
     // Selecting a tag opens the Search panel filtered to it — the same route the
-    // native palette and sidebar use (searchQuery: "#tag").
+    // native palette and sidebar use (searchQuery: "#tag"). Native tag rows render
+    // no icon cell (the "#" in the label is the marker).
     _tagRow(tag) {
       return {
         label: "#" + tag,
-        icon: "ti-hash",
+        noIcon: true,
         action: /* @__PURE__ */ __name(() => this._openSearchPanel("#" + tag), "action")
       };
     }
