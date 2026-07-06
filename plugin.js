@@ -7,7 +7,7 @@
 // fuzzy subsequence matching in one ranked list, inline action rows (Open Collection /
 // New <item> / Settings / Search-all-text / Create-in), native submenu ordering with
 // "Back", Shift+Enter → other panel, date queries → journal jump row, "Open Today's
-// Journal". Tags pseudo-collection is NOT replicated (no SDK hashtag enumeration).
+// Journal". (Tags pseudo-collection replication arrived in v5.)
 //
 // v4: command mode DELETED — the native ⌘P palette handles commands again. The plugin
 // owns only jump search; the original leak (native palette transitions into jump mode
@@ -15,36 +15,51 @@
 //   - A window-capture `focusin` listener discovers EVERY native palette the moment it
 //     opens (the palette always focuses its own input on open — load-bearing), no
 //     matter how it was opened: shortcut, sidebar/statusbar "Jump To" button, swipe.
-//     It reads the palette component's searchType ("JUMP" | "COMMANDS"; the mode is
-//     internal component state, NOT a ">" in the input — live-verified 2026-07-06).
-//   - searchType JUMP → destroy the palette component + open ours (prefill carried),
-//     UNLESS it was keyboard-opened (see escape hatch below).
-//   - searchType COMMANDS → native keeps it, but we attach a capture keydown listener
-//     to THAT input (detached on swap/destroy): "@" typed on empty input (native's
-//     switch-to-jump) and the jumpShortcut both swap to our palette flash-free; a
-//     click inside the dialog re-checks searchType on a 0-tick (the "Press @ to jump
-//     to..." row is a click-driven switch).
+//     It reads the palette component's searchType ("JUMP" | "COMMANDS" | "NEW"; the
+//     mode is internal component state, NOT a ">" in the input — live-verified
+//     2026-07-06).
+//   - searchType JUMP → destroy the palette component + open ours (prefill carried).
+//   - searchType COMMANDS → native keeps it, but we attach capture listeners to THAT
+//     input (detached on swap/destroy): "@" typed on empty input (native's
+//     switch-to-jump) swaps to our palette flash-free; every other keydown/click
+//     re-checks searchType on a 0-tick, so ANY internal transition to JUMP (backspace
+//     on empty input, a native jump binding pressed inside the palette, the "Press @
+//     to jump to..." row) swaps to ours. A transition to NEW stays native (watched,
+//     so a later backspace-to-JUMP still swaps).
+//   - searchType NEW → native keeps it (the create palette IS native functionality).
 //   - destroy() is the only safe close for a native palette (node.remove() desyncs
 //     the component's open/close toggle; synthetic Esc is ignored — untrusted).
 //   - Typing ">" in OUR palette hands off the other way: close ours, open the native
 //     command palette via the sidebar component's showCommandPalette() (the app's own
-//     launch_cmdpal handler, duck-typed tree walk — immune to shortcut remaps).
-//     v4.1: the command-palette shortcut (custom.commandShortcut, default Mod+P)
-//     pressed inside our palette does the same — palette switching is symmetric.
+//     launch_cmdpal handler, duck-typed tree walk — immune to shortcut remaps). The
+//     command-palette shortcut (custom.commandShortcut, default Mod+P) pressed inside
+//     our palette does the same — palette switching is symmetric.
 //
-// Shortcut model:
-// - jumpShortcut is user-configurable via the plugin Configuration tab
-//   ("custom": {"jumpShortcut": "Mod+K"}); "Mod" is Cmd on macOS, Ctrl elsewhere.
-//   Unparseable values fall back to the default. Parsing adapted from
-//   parham-shafti/thymer-reference-extravaganza (MIT).
-// - ESCAPE HATCH: a native jump palette opened via a KEYBOARD shortcut we didn't
-//   intercept (default ⌘⇧P, or whatever launch_cmdpal_jump is bound to) is deliberate
-//   — the global listener timestamps every unintercepted modifier combo, and a jump
-//   palette appearing within ESCAPE_HATCH_MS of one is left native (it's the only way
-//   to reach the Tags pseudo-collection, which we can't replicate). Button/click/swipe
-//   opens are always redirected.
-// - Suppression exists only while this plugin is loaded; if it crashes, all native
-//   behavior reverts.
+// v5: REDIRECT-ONLY — the plugin no longer binds its own global jump shortcut. Bind
+// the NATIVE jump palette (My Preferences → Change Keyboard Shortcuts) to whatever
+// key you want; the app opens its palette and the focusin hook swaps it for ours.
+// The v4 keyboard escape hatch is gone too — its only purpose was reaching the Tags
+// pseudo-collection, which the plugin now replicates:
+//   - Tags root row + submenu: hashtags enumerated via the sidebar component's cached
+//     collection controllers (getCachedPlugins()[n].getTagsInWorkspace() — internal
+//     API, CDP-verified 2026-07-06; no SDK equivalent). Selecting a tag opens the
+//     Search panel with "#tag" (the same route native uses).
+//   - Typing "+" (native's third palette mode, "Create a new item") hands off to the
+//     native NEW palette: showCommandPalette() then palette.setSearchType("NEW"),
+//     veiled during the flip (CDP-verified 2026-07-06).
+// To reach true-native jump: disable the plugin (Plugins UI, or Safe Mode via
+// diag.html). Suppression exists only while this plugin is loaded; if it crashes,
+// all native behavior reverts.
+//
+// Shortcut model (v5): the ONLY binding the plugin owns is commandShortcut
+// ("custom": {"commandShortcut": "Mod+P"}; "Mod" = Cmd on macOS, Ctrl elsewhere),
+// active ONLY while our palette is open — Thymer's app-level key handling is a single
+// window BUBBLE-phase dispatcher (CDP-verified 2026-07-06), and our palette stops
+// keystrokes from bubbling (the app thinks the editor is still focused, so leaked
+// keys would act on the document — data-loss territory). That also means app-global
+// shortcuts (⌘J etc.) do NOT fire while our palette is open; the jump binding itself
+// never needs to be known here because the app opens its palette first and we redirect.
+// Shortcut parsing adapted from parham-shafti/thymer-reference-extravaganza (MIT).
 //
 // Native surfaces the SDK doesn't document but reaches anyway (CDP-verified 2026-07-05
 // by reading panel.getNavigation()): Search panel = navigateTo({type:'search_panel',
@@ -118,18 +133,12 @@ const DYN_ALLOW_LIMIT = 500; // per dynamic view, when resolving its member reco
 // thymer-sdk-write-read-model) — poll before navigating.
 const CREATE_POLL_MS = 50;
 const CREATE_POLL_TRIES = 160;
-// A native JUMP palette that appears within this window of an unintercepted modifier
-// combo was keyboard-opened on purpose — the escape hatch to true-native jump (Tags
-// pseudo-collection etc.). Button/click/swipe opens have no recent combo → redirected.
-const ESCAPE_HATCH_MS = 400;
-// Configurable global binding (plugin Configuration tab → "custom"). "Mod" = Cmd on
-// macOS, Ctrl elsewhere. A binding must include Cmd/Ctrl or Alt so a bad config can't
-// hijack plain typing; anything unparseable falls back to this default.
-const DEFAULT_JUMP_SHORTCUT = "Mod+K";
 // Pressing the native command palette's binding INSIDE our palette hands off to
-// native commands — the mirror of pressing jumpShortcut inside the native palette.
-// We can't read the app's launch_cmdpal binding, so this is its own config knob
-// ("custom": {"commandShortcut": ...}); keep it in sync with any native remap.
+// native commands (the app can't see keys typed in our palette, so this must be
+// re-implemented). We can't read the app's launch_cmdpal binding, so this is its own
+// config knob ("custom": {"commandShortcut": ...}; "Mod" = Cmd on macOS, Ctrl
+// elsewhere); keep it in sync with any native remap. A binding must include
+// Cmd/Ctrl or Alt; anything unparseable falls back to this default.
 const DEFAULT_COMMAND_SHORTCUT = "Mod+P";
 // Case-insensitive: userAgentData.platform is "macOS" (lowercase m), navigator.platform
 // is "MacIntel". navigator.platform is deprecated but the only signal on Safari/Firefox.
@@ -154,16 +163,13 @@ export class Plugin extends AppPlugin {
         this._dynAllowRecs = new Set(); // record guids rescued by a visible dynamic view
         this._dynAllowCols = new Set(); // collection guids fully rescued ("*" = all)
         this._appRoot = null;         // cached app-root component (palette tree walk)
-        this._nativeJumpTs = 0;       // last unintercepted modifier combo (escape hatch)
         this._palInput = null;        // native command-palette input we've hooked
         this._palDlg = null;
         this._palKeyFn = null;
         this._palClickFn = null;
-        this._exemptDlgs = new WeakSet(); // keyboard-opened native jump palettes
+        this._tags = [];              // workspace hashtags (Tags pseudo-collection)
 
         const cust = (this.getConfiguration() || {}).custom || {};
-        this._jumpHotkey = this._parseShortcut(cust.jumpShortcut) ||
-            this._parseShortcut(DEFAULT_JUMP_SHORTCUT);
         this._cmdHotkey = this._parseShortcut(cust.commandShortcut) ||
             this._parseShortcut(DEFAULT_COMMAND_SHORTCUT);
 
@@ -223,35 +229,21 @@ export class Plugin extends AppPlugin {
         return (e.key || "").toLowerCase() === h.key;
     }
 
+    // Active ONLY while our palette is open (v5: the plugin owns no global binding —
+    // the app opens its own palette on the native jump shortcut and we redirect).
     _onGlobalKey(e) {
-        if (!e.isTrusted) return; // never react to synthetic dispatches
-        if (this._matchesHotkey(e, this._jumpHotkey)) {
-            // A visible native palette keeps focus in its own input; the per-palette
-            // interceptor (attached at focusin) owns the swap there, not us.
-            if (!this._overlay && document.querySelector(".cmdpal--dialog")) return;
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            e.stopPropagation();
-            if (this._overlay) this._close();
-            else this._open();
-            return;
-        }
-        // commandShortcut inside OUR palette = switch to native commands — the reverse
-        // of pressing jumpShortcut inside the native command palette. Only while our
-        // palette is open; closed, the app's own binding handles it (and the focusin
-        // hook attaches the interceptor to the palette it opens).
-        if (this._overlay && this._matchesHotkey(e, this._cmdHotkey)) {
+        if (!e.isTrusted || !this._overlay) return;
+        // commandShortcut inside OUR palette = switch to native commands. The app
+        // can't see keys typed here (our palette stops bubbling and the app's
+        // dispatcher is bubble-phase), so this transition must be re-implemented.
+        if (this._matchesHotkey(e, this._cmdHotkey)) {
             e.preventDefault();
             e.stopImmediatePropagation();
             e.stopPropagation();
             this._handoffToNativeCommands("");
             return;
         }
-        // Any modifier combo we did NOT intercept may be a native jump-palette binding
-        // (default ⌘⇧P, or whatever the user bound). A jump palette that appears right
-        // after one was keyboard-opened on purpose — the escape hatch (_onFocusIn).
-        if (e.metaKey || e.ctrlKey) this._nativeJumpTs = Date.now();
-        if (this._overlay && (e.key || "").toLowerCase() === "escape") {
+        if ((e.key || "").toLowerCase() === "escape") {
             e.preventDefault();
             e.stopImmediatePropagation();
             e.stopPropagation();
@@ -288,33 +280,24 @@ export class Plugin extends AppPlugin {
             const pal = this._findPalComp(dlg);
             if (!pal || pal._destroyed) return; // theme probe or non-component markup
             if (pal.searchType === "JUMP") {
-                if (this._exemptDlgs.has(dlg) ||
-                        Date.now() - this._nativeJumpTs < ESCAPE_HATCH_MS) {
-                    this._exemptDlgs.add(dlg); // escape hatch: stay native for its lifetime
-                    if (this._overlay) this._close(); // hatch used from our palette
-                    return;
-                }
                 this._swapFromNative(pal, input.value || "");
-            } else if (pal.searchType === "COMMANDS") {
+            } else if (pal.searchType === "COMMANDS" || pal.searchType === "NEW") {
+                // NEW (the "+" create palette) stays native, but is watched: a
+                // backspace-on-empty transition to JUMP must still swap to ours.
                 this._attachPalInterceptor(input, dlg, pal);
             }
         });
     }
 
-    // Capture listeners on the live native COMMAND palette: swap to our jump palette
-    // on the transitions native would otherwise handle itself.
+    // Capture listeners on the live native COMMANDS/NEW palette: swap to our jump
+    // palette whenever its mode transitions to JUMP.
     _attachPalInterceptor(input, dlg, pal) {
         if (this._palInput === input) return; // already hooked (focusin refires)
         this._detachPalInterceptor();
         const keyFn = (e) => this._onPalKey(e, input, pal);
         // The "Press @ to jump to..." row switches modes via CLICK (no keystroke, no
         // refocus) — re-check searchType on a 0-tick after any click in the dialog.
-        const clickFn = () => setTimeout(() => {
-            if (pal._destroyed || !pal.node || !pal.node.isConnected) return;
-            if (pal.searchType === "JUMP") {
-                this._swapFromNative(pal, (input.isConnected && input.value) || "");
-            }
-        }, 0);
+        const clickFn = () => this._schedulePalRecheck(pal, input);
         input.addEventListener("keydown", keyFn, true);
         dlg.addEventListener("click", clickFn, true);
         this._palInput = input;
@@ -339,25 +322,35 @@ export class Plugin extends AppPlugin {
     _onPalKey(e, input, pal) {
         if (!e.isTrusted) return;
         if (!input.isConnected || pal._destroyed) { this._detachPalInterceptor(); return; }
-        // If a native binding already switched this palette to jump mode internally,
-        // it's escape-hatch territory now — hands off for its lifetime.
-        if (pal.searchType !== "COMMANDS") { this._exemptDlgs.add(pal.node); return; }
-        // jumpShortcut inside the native command palette = switch to jump → ours.
-        if (this._matchesHotkey(e, this._jumpHotkey)) {
+        // "@" on an empty COMMANDS input is native's switch-to-jump; consume it
+        // pre-render (flash-free) and open ours instead.
+        if (pal.searchType === "COMMANDS" && e.key === "@" &&
+                !e.metaKey && !e.ctrlKey && !e.altKey && !input.value) {
             e.preventDefault();
             e.stopImmediatePropagation();
             e.stopPropagation();
             this._swapFromNative(pal, "");
             return;
         }
-        // "@" on an empty input is native's switch-to-jump; consume it pre-render
-        // (flash-free) and open ours instead.
-        if (e.key === "@" && !e.metaKey && !e.ctrlKey && !e.altKey && !input.value) {
-            e.preventDefault();
-            e.stopImmediatePropagation();
-            e.stopPropagation();
-            this._swapFromNative(pal, "");
-        }
+        // Anything else may flip the palette's mode internally — backspace on an
+        // empty input returns to JUMP from any mode, and a native jump binding
+        // pressed inside the palette switches it without any signal we can read
+        // synchronously. Re-check after the app has handled the key.
+        this._schedulePalRecheck(pal, input);
+    }
+
+    // 0-tick mode recheck: runs after the app processed the triggering key/click.
+    // JUMP → swap to ours (the swap veil hides any single-frame native paint).
+    _schedulePalRecheck(pal, input) {
+        setTimeout(() => {
+            if (pal._destroyed || !pal.node || !pal.node.isConnected) {
+                this._detachPalInterceptor();
+                return;
+            }
+            if (pal.searchType === "JUMP") {
+                this._swapFromNative(pal, (input.isConnected && input.value) || "");
+            }
+        }, 0);
     }
 
     // Destroy a live native jump palette and open ours in its place, carrying any
@@ -396,6 +389,28 @@ export class Plugin extends AppPlugin {
             inp.value = query;
             inp.dispatchEvent(new Event("input", { bubbles: true }));
         }, 30);
+    }
+
+    // Typing "+" in our palette opens the native create palette: open COMMANDS via
+    // the app's own entry point, then flip the component to NEW the same way native's
+    // own "+" prefix does (setSearchType). Veiled during the flip so the one-frame
+    // COMMANDS render can't paint. Live-verified 2026-07-06.
+    async _handoffToNativeNew() {
+        this._close();
+        const sidebar = this._findSidebar();
+        if (!sidebar) return;
+        this._setVeil(true);
+        try {
+            await sidebar.showCommandPalette();
+            const dlg = document.querySelector(".cmdpal--dialog");
+            const pal = this._findPalComp(dlg);
+            if (pal && !pal._destroyed && typeof pal.setSearchType === "function") {
+                await pal.setSearchType("NEW");
+            }
+        } catch (e) { /* best-effort: worst case the commands palette is open */
+        } finally {
+            this._setVeil(false);
+        }
     }
 
     // ---------- data ----------
@@ -476,6 +491,20 @@ export class Plugin extends AppPlugin {
         return this._dynAllowRecs.has(recGuid);
     }
 
+    // Workspace hashtags (the native Tags pseudo-collection). No SDK API exists;
+    // the sidebar's cached collection controllers expose getTagsInWorkspace(), a
+    // synchronous read of the app's workspace data cache (CDP-verified 2026-07-06).
+    // Duck-typed and best-effort: if the internals move, the Tags row just disappears.
+    _readTags() {
+        try {
+            const sidebar = this._findSidebar();
+            if (!sidebar || typeof sidebar.getCachedPlugins !== "function") return;
+            const ctrl = (sidebar.getCachedPlugins() || [])
+                .find((p) => p && typeof p.getTagsInWorkspace === "function");
+            if (ctrl) this._tags = ctrl.getTagsInWorkspace() || [];
+        } catch (e) { /* keep the previous list */ }
+    }
+
     _creatable() {
         return this._cols.filter((c) => !c.isJournal && !c.isDynamic);
     }
@@ -488,6 +517,7 @@ export class Plugin extends AppPlugin {
         // Cache the app root now, while focus is still in the app (a real component),
         // so palette-component lookups work regardless of later focus moves.
         this._cacheAppRoot();
+        this._readTags();
         this._level = { mode: "root" };
         this._searchRecs = [];
         this._refreshCollections();
@@ -523,6 +553,12 @@ export class Plugin extends AppPlugin {
                 this._handoffToNativeCommands(this._input.value.slice(1));
                 return;
             }
+            // "+" as first char is native's third mode (NEW, "Create a new item") —
+            // also native functionality; hand off the same way.
+            if (this._level.mode === "root" && this._input.value.startsWith("+")) {
+                this._handoffToNativeNew();
+                return;
+            }
             clearTimeout(this._debounce);
             this._debounce = setTimeout(() => this._render(), DEBOUNCE_MS);
         });
@@ -537,7 +573,7 @@ export class Plugin extends AppPlugin {
         this._footer = document.createElement("div");
         this._footer.className = "scs-footer";
         this._footer.textContent =
-            "↑↓ Navigate · ↵ Select · ⇧↵ Use other panel · Esc Back/Close · > Commands";
+            "↑↓ Navigate · ↵ Select · ⇧↵ Use other panel · Esc Back/Close · > Commands · + New";
 
         palette.appendChild(inputRow);
         palette.appendChild(this._list);
@@ -754,12 +790,13 @@ export class Plugin extends AppPlugin {
         const entries =
             this._level.mode === "root" ? (q ? this._rootQueryEntries(q) : this._rootEmptyEntries())
             : this._level.mode === "collection" ? this._collectionEntries(q)
+            : this._level.mode === "tags" ? this._tagEntries(q)
             : this._createPickEntries(q);
 
-        this._crumb.style.display =
-            (this._level.mode === "collection" || this._level.mode === "create-pick") ? "" : "none";
+        this._crumb.style.display = this._level.mode === "root" ? "none" : "";
         this._crumb.textContent =
             this._level.mode === "collection" ? this._level.entry.name + " ›"
+            : this._level.mode === "tags" ? "Tags ›"
             : this._level.mode === "create-pick" ? "New page ›" : "";
 
         this._list.textContent = "";
@@ -818,6 +855,16 @@ export class Plugin extends AppPlugin {
             action: () => this._handoffToNativeCommands(""),
         });
         entries.push({ divider: true });
+        // Native orders the Tags pseudo-collection first among collection rows.
+        if (this._tags.length) {
+            entries.push({
+                label: "Tags",
+                icon: "ti-hash",
+                arrow: true,
+                noHighlight: true,
+                action: () => this._enterTags(),
+            });
+        }
         for (const c of this._cols) {
             entries.push({
                 label: c.name,
@@ -850,6 +897,18 @@ export class Plugin extends AppPlugin {
         // fuzzy scorer so e.g. "Open Collection 'Notes'" ranks on the "Not" in Notes.
         const scored = [];
         const add = (rank, m, row) => { if (m) scored.push(Object.assign(row, { rank, score: m.score, indices: m.indices })); };
+
+        // Tags pseudo-collection: enter row ranks with collections; individual
+        // "#tag" rows rank with pages (native matches them on the "#tag" label).
+        if (this._tags.length) {
+            add(0, fuzzyMatch(q, "Tags"), {
+                label: "Tags", icon: "ti-hash", arrow: true,
+                action: () => this._enterTags(),
+            });
+            for (const t of this._tags) {
+                add(3, fuzzyMatch(q, "#" + t), this._tagRow(t));
+            }
+        }
 
         for (const c of this._cols) {
             // Enter-submenu row — only when the collection NAME matches (native).
@@ -949,6 +1008,44 @@ export class Plugin extends AppPlugin {
             sub: colEntry ? colEntry.name : null,
             action: (opts) => this._openRecord(record.guid, opts),
         };
+    }
+
+    // Selecting a tag opens the Search panel filtered to it — the same route the
+    // native palette and sidebar use (searchQuery: "#tag").
+    _tagRow(tag) {
+        return {
+            label: "#" + tag,
+            icon: "ti-hash",
+            action: () => this._openSearchPanel("#" + tag),
+        };
+    }
+
+    // ---------- Tags submenu (native pseudo-collection) ----------
+
+    _enterTags() {
+        this._readTags(); // cheap sync refresh so the list isn't stale
+        this._level = { mode: "tags" };
+        this._input.value = "";
+        this._render();
+    }
+
+    _tagEntries(q) {
+        const entries = [{
+            label: "Back", icon: "ti-arrow-left", noHighlight: true,
+            action: () => this._back(),
+        }];
+        const rows = [];
+        for (const t of this._tags) {
+            const m = fuzzyMatch(q, "#" + t);
+            if (q && !m) continue;
+            const row = this._tagRow(t);
+            row.indices = m ? m.indices : null;
+            row.score = m ? m.score : 0;
+            rows.push(row);
+        }
+        if (q) rows.sort((a, b) => b.score - a.score);
+        entries.push(...rows);
+        return this._fixSubmenuSel(entries, q);
     }
 
     // ---------- collection submenu (native ordering) ----------

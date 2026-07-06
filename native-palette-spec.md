@@ -247,3 +247,69 @@ appear conditionally. A clone must therefore read the catalog live, not hardcode
   Verified end-to-end with Toggle Sidebar (and toggled back).
 - If the dialog still exists ~150ms after Enter, the command opened a follow-up
   widget → remove the veil to reveal the native follow-up in place.
+
+---
+
+# Addendum: full mode model + Tags internals (CDP + bundle read, 2026-07-06)
+
+Read out of the live app and the minified bundle (`app-U7WKRYZI.js`), driving the
+real components over CDP. Supersedes the "@/> two modes" picture above.
+
+## Three searchTypes, one table
+
+The palette component has exactly three modes, defined in one bundle table:
+
+| searchType | prefix char | placeholder |
+|---|---|---|
+| `JUMP` | `@` | "Search a doc name, date, user, or command..." |
+| `COMMANDS` | `>` | "Search a command..." |
+| `NEW` | `+` | "Create a new item" |
+
+- `onInput`: if the ENTIRE input equals one of the prefix chars and it differs from
+  the current mode → `setSearchType(mode)` (the char is consumed). So `+` works from
+  @ mode and > mode alike.
+- `onBeforeInput`: backspace/delete-word on an EMPTY input in any mode →
+  `setSearchType("JUMP")`. This is a mode transition with no focus change — a clone
+  watching a native palette must poll `searchType` after keys, not rely on focusin.
+- `setSearchType` clears the input and repopulates via the per-mode setup switch.
+
+## NEW mode ("+", create palette)
+
+Populated by `sideBar.populateAutoCompleteWithNewOptions(autocomplete)`:
+"Sub-page of <current page>" (when the focused panel's collection supports sub-pages)
+→ "New <item>" for the focused panel's collection → divider → one "New <item>" row
+per creatable collection (default-new collection sorted first) → divider →
+"New Collection..." (+ "New Dynamic Collection..." when enabled).
+
+Programmatic open (live-verified): `sideBar.showCommandPalette()` then
+`palette.setSearchType("NEW")` — identical to native's own `+` transition.
+
+## Tags pseudo-collection internals
+
+- Root "Tags" row = a **category filter**: `addCategoryFilters([{value:"tag",
+  label:"Tags", icon:"ti ti-hash"}])` — why it sorts before collection rows.
+- Tag rows = static options from `getTagsInWorkspace(wsGuid)`: one per hashtag,
+  `{category:"tag", value:"search_tag", label:"#"+tag}`.
+- Selecting a tag opens the Search panel with `searchQuery: "#"+tag` (same route as
+  the sidebar's Tags section: `targetPanelType: SearchPanel`).
+- `getTagsInWorkspace` is a SYNCHRONOUS read of a per-workspace cache
+  (`tagsInWorkspace`, rebuilt from the line index on data-cache reloads). No SDK
+  exposure; reachable from a plugin via the sidebar component:
+  `sideBar.getCachedPlugins()[n].getTagsInWorkspace()` (any cached collection
+  controller works — it reads workspace-level state). Also present on the SDK
+  `PluginCollection` wrapper's internal controller (`col._getPlugin()`).
+
+## App key handling (why palette clones must block keys)
+
+The app's entire keyboard dispatch is ONE window **bubble-phase** keydown listener
+(plus idle/timer listeners); there are NO capture-phase app listeners. Consequences:
+
+- A clone that stops propagation at its own root swallows everything: app-global
+  shortcuts (⌘J etc.) can't fire while it's open. They also SHOULDN'T be allowed
+  through wholesale — `g_focusedComponent` still points at the previously-focused
+  editor, so leaked combos would act on the document.
+- Nothing needs a capture-phase race for redirection: the app opens its palette from
+  the bubble dispatcher, then the palette focuses its input → a capture `focusin`
+  hook always sees it.
+- Native's own toggle: `showCommandPalette(type)` closes an existing palette of the
+  same searchType instead of reopening.
