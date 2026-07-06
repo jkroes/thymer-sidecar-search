@@ -65,13 +65,14 @@ var plugins = (() => {
 .scs-cal-btns{display:flex;gap:18px;align-items:center;}
 .scs-cal-btn{cursor:pointer;opacity:.65;padding:0 4px;}
 .scs-cal-btn:hover{opacity:1;}
-.scs-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);text-align:center;row-gap:3px;}
+.scs-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);justify-items:center;
+  text-align:center;row-gap:3px;}
 .scs-cal-dow{opacity:.55;padding:2px 0;}
-.scs-cal-day{cursor:pointer;border-radius:3px;padding:2px 0;}
+/* Compact chip like native: the highlight hugs the number, not the column. */
+.scs-cal-day{cursor:pointer;border-radius:4px;padding:2px 0;min-width:2.2em;}
 .scs-cal-day:hover{background:var(--scs-border,rgba(255,255,255,.1));}
-.scs-cal-day.scs-cal-dim{opacity:.4;}
 .scs-cal-day.scs-cal-hl{background:var(--scs-sel-bg,color(display-p3 0.267 0.514 0.482));
-  color:var(--scs-fg-bright,color(display-p3 0.929 0.929 0.929));opacity:1;}
+  color:var(--scs-fg-bright,color(display-p3 0.929 0.929 0.929));}
 /* Veil that hides a native palette during the destroy-and-replace swap so it can't
    paint a frame of native jump results. opacity:0 (NOT visibility:hidden) keeps the
    element focusable \u2014 the palette's self-focus is what our focusin discovery and
@@ -970,7 +971,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       for (let i = 0; i < 42; i++) {
         const d = new Date(start.getFullYear(), start.getMonth(), start.getDate() + i);
         const el = document.createElement("span");
-        el.className = "scs-cal-day" + (d.getMonth() !== base.getMonth() ? " scs-cal-dim" : "") + (sameDay(d, hl) ? " scs-cal-hl" : "");
+        el.className = "scs-cal-day" + (sameDay(d, hl) ? " scs-cal-hl" : "");
         el.textContent = String(d.getDate());
         el.addEventListener("click", () => {
           level.calDate = d;
@@ -1306,11 +1307,11 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
   __name(wrapDate, "wrapDate");
   function fmtDate(dt) {
     try {
-      return dt.toDate().toLocaleDateString("en-US", {
-        weekday: "short",
-        month: "short",
-        day: "numeric"
-      });
+      const d = dt.toDate();
+      const wd = d.toLocaleDateString("en-US", { weekday: "short" });
+      const mo = d.toLocaleDateString("en-US", { month: "short" });
+      const yr = d.getFullYear() === (/* @__PURE__ */ new Date()).getFullYear() ? "" : " " + d.getFullYear();
+      return `${wd} ${mo} ${d.getDate()}${yr}`;
     } catch (e) {
       return "Open journal for date";
     }
