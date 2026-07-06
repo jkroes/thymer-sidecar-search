@@ -313,3 +313,21 @@ The app's entire keyboard dispatch is ONE window **bubble-phase** keydown listen
   hook always sees it.
 - Native's own toggle: `showCommandPalette(type)` closes an existing palette of the
   same searchType instead of reopening.
+
+## Journal submenu, exact behavior (CDP-observed 2026-07-06)
+
+Row order: `← Back` → inline calendar widget (`:wdg-date`, not replicated in
+sidecar) → date row → `Open Collection 'Journal'` → `Journal: Collection
+Settings...`. No New row, no page items.
+
+- The date row (`value: "set_date"`) is ALWAYS present and selectable: on an empty
+  query it's labeled "Try: monday, 7 days, aug 1" and carries TODAY's date; a
+  parsed date query relabels it ("Mon Jul 13") and retargets. It is the DEFAULT
+  SELECTION — Journal → Enter opens today's journal. (Other collection submenus
+  default to their Open Collection row.)
+- Both `set_date` and root `journal_gohome` ("Open Today's Journal") navigate the
+  focused panel to `edit_panel` with a SYNTHETIC rootId:
+  `S-<journalCollGuid>-<userGuid>-0-<yyyymmdd>`. `getJournalLineForDate(ws, user,
+  date)` is generative — it returns that guid for ANY date, no record needs to
+  exist (the day page materializes on demand). The SDK's
+  `panel.navigateToJournal(user, dt)` produces the identical navigation.

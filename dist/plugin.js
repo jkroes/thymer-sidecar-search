@@ -42,7 +42,6 @@ var plugins = (() => {
 .scs-list{overflow-y:auto;flex:1;padding:0 0 5px;}
 .scs-divider{height:0;margin:6px 10px 6px 5px;
   border-top:1.5px solid var(--scs-border,rgba(255,255,255,.1));opacity:.3;}
-.scs-static{padding:5px 10px 5px 15px;font-size:14px;opacity:.6;}
 .scs-row{display:flex;align-items:center;gap:8px;padding:5px 10px;border-radius:3px;
   margin:0 5px;width:calc(100% - 10px);box-sizing:border-box;cursor:pointer;font-size:14px;}
 .scs-row.scs-sel{background:var(--scs-sel-bg,color(display-p3 0.267 0.514 0.482));
@@ -944,15 +943,15 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       entries.push(...filter(actions));
       if (entry.isJournal) {
         const dt = parseDate(q);
-        if (dt) {
+        if (dt || !q) {
+          for (const en of entries) en.defaultSel = false;
           entries.splice(1, 0, {
-            label: fmtDate(dt),
+            label: dt ? fmtDate(dt) : "Try: monday, 7 days, aug 1",
             icon: "ti-calendar-event",
             noHighlight: true,
+            defaultSel: true,
             action: /* @__PURE__ */ __name((opts) => this._openJournal(dt, opts), "action")
           });
-        } else if (!q) {
-          entries.push({ static: "Try: monday, 7 days, aug 1" });
         }
         return this._fixSubmenuSel(entries, q);
       }

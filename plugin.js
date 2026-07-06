@@ -98,7 +98,6 @@ const CSS = `
 .scs-list{overflow-y:auto;flex:1;padding:0 0 5px;}
 .scs-divider{height:0;margin:6px 10px 6px 5px;
   border-top:1.5px solid var(--scs-border,rgba(255,255,255,.1));opacity:.3;}
-.scs-static{padding:5px 10px 5px 15px;font-size:14px;opacity:.6;}
 .scs-row{display:flex;align-items:center;gap:8px;padding:5px 10px;border-radius:3px;
   margin:0 5px;width:calc(100% - 10px);box-sizing:border-box;cursor:pointer;font-size:14px;}
 .scs-row.scs-sel{background:var(--scs-sel-bg,color(display-p3 0.267 0.514 0.482));
@@ -1092,15 +1091,20 @@ export class Plugin extends AppPlugin {
         entries.push(...filter(actions));
 
         if (entry.isJournal) {
-            // Native journal submenu: date hint, no New row, no items.
+            // Native journal submenu (CDP-observed 2026-07-06): no New row, no items,
+            // and a SELECTABLE date row right after Back — labeled "Try: monday,
+            // 7 days, aug 1" on an empty query but resolving to TODAY, retargeted by
+            // a parsed date query. It's the default selection, so entering the
+            // submenu and pressing Enter opens today's journal. (Native also shows
+            // an inline calendar widget there — not replicated.)
             const dt = parseDate(q);
-            if (dt) {
+            if (dt || !q) {
+                for (const en of entries) en.defaultSel = false;
                 entries.splice(1, 0, {
-                    label: fmtDate(dt), icon: "ti-calendar-event", noHighlight: true,
+                    label: dt ? fmtDate(dt) : "Try: monday, 7 days, aug 1",
+                    icon: "ti-calendar-event", noHighlight: true, defaultSel: true,
                     action: (opts) => this._openJournal(dt, opts),
                 });
-            } else if (!q) {
-                entries.push({ static: "Try: monday, 7 days, aug 1" });
             }
             return this._fixSubmenuSel(entries, q);
         }
