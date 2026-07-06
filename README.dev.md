@@ -1,5 +1,41 @@
 # sidecar-search
 
+**Status (2026-07-05): v3 — Cmd-P `>` command mode implemented + live-verified
+(CDP-driven, hot-reload push).** The clone now replaces BOTH Cmd-K (search) and Cmd-P
+(commands). Command mode renders the full native command catalog with byte-identical
+results and sorting (verified 0/12 mismatches vs the native palette's own `ac.results`
+across `insert/set/pa/to/flag/theme/task/move/code/new/help/panel`), matches native's
+root layout / chrome / hidden footer, honors the mode switches (⌘K↔⌘P, `>`-to-switch,
+Esc/Backspace, submenus), executes commands through the app's real dispatcher
+(`confirmOptionEx`), and hands multi-step commands (Set Theme, Move…, New Page in…) to
+the real native follow-up widget in place. Reliability 12/12 open+exec+cleanup cycles.
+
+How command mode works (and the dead ends that shaped it):
+- **One kept-alive native palette per session**, opened with a SINGLE synthetic ⌘P.
+  Repeated/retried ⌘P desync the palette's open/close toggle into a wedged
+  empty-catalog state; `node.remove()` desyncs the component (leaves it "open" so the
+  next ⌘P toggles it closed). So: open once, only `destroy()` to close.
+- **opacity:0 veil, not visibility:hidden.** A `visibility:hidden` palette can't focus
+  its own input, so it never becomes `g_focusedComponent` and the component lookup
+  falls back to a ~1s tree-walk (empty catalog / slow load). `opacity:0` hides it
+  fully while keeping it focusable → located in ~5ms, no flash, ~100ms to populated.
+- **The catalog is context-built** (editor/panel state at open) — insert/edit/task/
+  colview sections only exist with an editor focused; an overlay/focus disruption at
+  open time yields an empty catalog. We open the palette from `_open` before the
+  clone overlay steals focus.
+- **Match options by field, not identity** — the palette rebuilds option objects on
+  every search (labels carry a per-build prefix), so `value+label+category+json`
+  identifies a command across rebuilds.
+- **Rendering is the app's own `window.fuzzysort`** over `[label, tag,
+  _normalizedLabel]` with per-option `scoreFactor` and the `-60000` cutoff, category
+  rows matched on `[label, tag]` and kept in front, equal scores tie-broken by
+  normalized label — identical to native by construction.
+
+NOT persisted in-app yet — hot-reload pushes are ephemeral; stop hot reload and save
+the plugin in-app to keep v3.
+
+---
+
 **Status (2026-07-05): v2 implemented AND live-verified in the web app (CDP-driven,
 hot-reload push).** Verified live: root empty layout, fuzzy ranked mixed list
 ("test" reproduces the spec's observed row mix), date jump rows ("monday" → Mon Jul 6,

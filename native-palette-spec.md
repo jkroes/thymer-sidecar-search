@@ -142,3 +142,108 @@ Thymer's UI responds fully to isTrusted:false events):
 Unobservable/undetermined: exact fuzzy ranking weights; user-row behavior
 (single-user workspace); date-row effect (untested to avoid creating journal
 records).
+
+---
+
+# `>` command mode (Cmd-P) — observed spec (2026-07-05)
+
+Studied for the Cmd-P replacement. Sources: CDP driving of the live web app +
+inspection of the app bundle's runtime state (the palette component is reachable at
+`globalThis.g_focusedComponent` while focused; its data model is described below from
+live reads, not from guessing).
+
+## Data model (live-read from the palette instance)
+
+The palette component (`.cmdpal--dialog`, `g_focusedComponent` when focused) has
+`searchType` ("JUMP" = `@`, "COMMANDS" = `>`, "NEW" = `+`), `input`, and `autocomplete`.
+The autocomplete holds:
+
+- **`categoryFilters`** — submenu rows + the mode-switch hint. In > mode (6 entries):
+  `searchtype_JUMP` hint ("Press @ to jump to...", kbd ⌘K), `:cat:div` divider,
+  `colview_record_options` ("This document...", icon = collection icon), divider,
+  `operation` ("Commands", ti-terminal), `settings` ("Settings", ti-settings).
+- **`staticOptions`** — the full flat catalog (164 observed with an editor focused).
+  Each option: `category`, `value` (action id), `label`, `tag` (hidden search
+  keywords, e.g. Set Theme → "settings Theme Dark Light Appearance"; MCP settings →
+  "...Claude Clawd GPT LLM CLI ChatGPT Codex"), `icon`, `kbd` (display string like
+  "⌘⇧↵"), `scoreFactor` (rank boost; e.g. Set Theme 4.2, Toggle Day/Night 0.7,
+  insert rows 1.2, code-language rows 0.1), `json` (action payload, may hold live
+  object refs), `hideTag`, `showOnlyWhenSearching` (42 code-language "Code block: X"
+  rows), `hideWhenSearching`, `pinned`, `_normalizedLabel`. Row types: options
+  (no `type`), `:hdr` = 30px labeled heading ("Change into", "Insert",
+  "Workspace (...)", "Account Admin", the doc-name header), `:div` = 5px divider,
+  `:html:hdr` = the 65px settings user card (`htmlHeader.html`), `:cat`/`:cat:div`.
+- Categories observed: `insert` (65), `edit_cmdpal_actions` (36),
+  `colview_record_options` (11), `settings` (25), `operation` (27). Plugin palette
+  commands (ui.addCommandPaletteCommand) are appended into the settings category
+  region when plugins are loaded.
+
+## Rendering rules
+
+- **Root, empty query**: categoryFilters in order (`:cat` rows get `→`; the JUMP hint
+  also shows ⌘K), then every staticOption whose category has NO categoryFilter
+  (= `insert` + `edit_cmdpal_actions`) in catalog order, rendering `:hdr` headings and
+  `:div` dividers, skipping `showOnlyWhenSearching` rows. Status footer is
+  `display:none` in > mode (no keyboard hints).
+- **Submenu** (Enter/click on a category row; ArrowRight does NOT enter): "← Back"
+  placeholder row first (arrow-SELECTABLE, sits before the wrap point), then that
+  category's options in catalog order (`:hdr`/`:div`/`:html:hdr` rendered). Default
+  selection = first selectable row after Back (Settings: "Display Name" — the card
+  and divider aren't selectable).
+- **Search** (any level): one ranked list.
+  - Matcher is **fuzzysort** (the app exposes its instance at `window.fuzzysort` /
+    `globalThis._fuzzysort`), over keys `[label, tag, _normalizedLabel]`
+    (`_normalizedLabel` = NFD diacritic-strip + lowercase).
+  - Score = max over key matches of `score / scoreFactor` (fuzzysort v1 negative
+    scores; dividing a negative score by a factor >1 boosts it). Results with
+    score < -60000 are dropped.
+  - At root, categoryFilters are matched separately (keys `[label, tag]`) and placed
+    BEFORE option matches (that's why "This document..." outranks "Set Theme" for
+    "set" despite a scattered match). Equal scores tie-break alphabetically by
+    normalized label; otherwise fuzzysort's score order is kept (stable sort).
+  - `:hdr` rows and `hideWhenSearching` rows are excluded while searching. In a
+    submenu, "← Back" stays on top while searching; only that category's options are
+    matched (no category rows).
+  - Label highlight = the label key's fuzzysort match (bold bright spans). If the
+    match was on `tag` and `hideTag` is false, the right side shows `>` + the
+    highlighted tag; `hideTag:true` rows (most settings) match invisibly ("Move..."
+    matches "pa" via its "move collection sub-page reparent" tag with no visible
+    highlight).
+  - No match: single "No results" row (no create/search fallbacks in > mode).
+- **kbd rendering**: modifier glyphs (⌘⇧⌃⌥↵⇥ arrows ⌫⌦) get
+  `<span class="kbdmod kbdmod-mac">` wrapping; letters are plain text.
+
+## Keyboard/mode semantics (all live-verified)
+
+- ⌘P opens > mode; ⌘P while the palette is open in @ mode SWITCHES it to > in place;
+  ⌘P while already in > mode closes it. ⌘K is the same in reverse.
+- Typing `>` as first char in @ mode switches to > mode (the char is consumed).
+  Typing `@` in > mode does NOT switch back — it's literal text.
+- Esc: submenu → root; root → close. Backspace on empty input: does NOTHING in
+  > mode (no back-navigation, unlike @ submenus).
+- Arrow nav wraps at both ends. Enter executes; hint row Enter switches mode.
+- Selecting a category row clears the input and enters the submenu.
+- Multi-step commands (Set Theme, Display Name, Move..., New Page in...) keep the
+  palette open and swap in a follow-up widget (color grid / input / picker) inside
+  the same dialog.
+
+## Context dependence
+
+The catalog is rebuilt at every open from live app state: `insert`,
+`edit_cmdpal_actions`, and `colview_record_options` exist only with a
+document/editor context; the This-document category carries the current record's
+name/guid; properties-visibility rows vary with panel state; desktop vs web differ
+("Change Thymer App Icon" vs "Create Desktop Shortcut"); Leave Workspace/Logout
+appear conditionally. A clone must therefore read the catalog live, not hardcode it.
+
+## Mechanics that make a clone possible (spiked 2026-07-05)
+
+- Synthetic ⌘P opens the palette with the full catalog ready in **~7ms**.
+- The palette survives focus moving to another input, and stays open (veiled) while
+  a `visibility:hidden !important` rule hides it.
+- Execution: set the veiled palette's input value to the target label, dispatch an
+  `input` event, find the result row by option-object identity, `selectOption(idx)`,
+  dispatch Enter on its input → the command runs through the app's own dispatcher.
+  Verified end-to-end with Toggle Sidebar (and toggled back).
+- If the dialog still exists ~150ms after Enter, the command opened a follow-up
+  widget → remove the veil to reveal the native follow-up in place.

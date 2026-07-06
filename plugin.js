@@ -1,29 +1,50 @@
 /// <reference path="../../sdk/types.d.ts" />
-// sidecar-search — replaces Cmd-K with a plugin-owned popup palette that also covers
-// collections hidden from the native palette (show_cmdpal_items: false).
+// sidecar-search — replaces Cmd-K AND Cmd-P with a plugin-owned popup palette that also
+// covers collections hidden from the native palette (show_cmdpal_items: false).
 //
 // v2: native-palette parity per native-palette-spec.md (CDP-observed 2026-07-05):
 // fuzzy subsequence matching in one ranked list, inline action rows (Open Collection /
 // New <item> / Settings / Search-all-text / Create-in), native submenu ordering with
 // "Back", Shift+Enter → other panel, date queries → journal jump row, "Open Today's
-// Journal", and "> command mode" delegation to the native palette. Tags pseudo-
-// collection is NOT replicated (no SDK hashtag enumeration).
+// Journal". Tags pseudo-collection is NOT replicated (no SDK hashtag enumeration).
+//
+// v3: "> command mode" (Cmd-P) implemented natively — see native-palette-spec.md's
+// command-mode section for the observed native spec and README.dev.md for the build
+// history. The command catalog is context-built by the app at palette open, so we
+// read it live rather than hardcoding. Architecture (learned the hard way — the
+// pitfalls below are all real):
+//   - ONE kept-alive native palette per command-mode session (this._nativePal),
+//     opened via a SINGLE synthetic ⌘P. Repeated/retried ⌘P desync the palette's
+//     open/close toggle into a wedged empty-catalog state, so we open exactly once
+//     and only ever destroy() to close (node.remove() desyncs the component too).
+//   - The palette is hidden with opacity:0, NOT visibility:hidden — a
+//     visibility:hidden element can't focus its own input, and that self-focus is
+//     what lets us locate the palette component (via the app's g_focusedComponent →
+//     tree walk) in ~5ms instead of a ~1s fallback walk. opacity:0 hides it just as
+//     completely while keeping it focusable, so there is no native-palette flash.
+//   - Rendering + ranking read the live palette's categoryFilters/staticOptions and
+//     run through the app's own window.fuzzysort with the same keys/scoreFactor/
+//     cutoff pipeline — identical results and sorting by construction (0/12 parity).
+//   - Executing a command calls the palette's own confirmOptionEx(optionObject) —
+//     the app's real dispatch path — matching the option by field (value+label+
+//     category+json; the palette rebuilds option objects per search so identity
+//     won't hold). If the palette is still open ~180ms after confirm, the command
+//     opened a follow-up widget (Set Theme, Display Name, Move..., New Page in...):
+//     we lift the veil and hand the real native follow-up UI to the user in place.
 //
 // Shortcut model (live-verified via plugins/cmdp-probe, 2026-07-05, web app):
-// - We steal Cmd-K at window-capture BEFORE Thymer's handler (preventDefault +
-//   stopImmediatePropagation suppresses the native palette).
+// - We steal Cmd-K and Cmd-P at window-capture BEFORE Thymer's handler
+//   (preventDefault + stopImmediatePropagation suppresses the native palette).
 // - Cmd+Shift+P is natively an alias of Cmd-K and we deliberately do NOT intercept it,
-//   so it remains the escape hatch to the native palette.
-// - Suppression exists only while this plugin is loaded; if it crashes, Cmd-K reverts.
+//   so it remains the escape hatch to the native palette. While a VISIBLE native
+//   palette is open, we don't intercept anything.
+// - Suppression exists only while this plugin is loaded; if it crashes, both revert.
 //
 // Native surfaces the SDK doesn't document but reaches anyway (CDP-verified 2026-07-05
 // by reading panel.getNavigation()): Search panel = navigateTo({type:'search_panel',
 // state:{searchQuery}}); collection Settings = navigateTo({type:'collection_settings',
 // rootId:<colGuid>}). These replaced the old palette-driving synthetic routes, so no
-// native modal flashes on the way to the target. The one remaining synthetic route is
-// "> command mode": a synthetic ⌘P opens the native command palette directly (it IS
-// the destination — nothing flashes through), since that palette is a modal, not a
-// panel nav type.
+// native modal flashes on the way to the target.
 //
 // UI is raw DOM appended to document.body — never touches editor content (DATA-LOSS
 // DIRECTIVE: no editor DOM, no MutationObserver on body, no content rewriting).
@@ -73,11 +94,42 @@ const CSS = `
 .scs-footer{padding:10px;font-size:11px;color:var(--scs-fg,color(display-p3 0.769 0.769 0.769));
   border-top:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between;}
 .scs-empty{padding:18px;text-align:center;font-size:14px;opacity:.6;}
+/* > command mode extras (metrics probed from the native classes at open; the literals
+   are fallbacks): 5px divider slots, 30px labeled heading rows, the settings user
+   card, and shortcut text. */
+.scs-cdiv{height:var(--scs-cdiv-height,5px);margin:var(--scs-cdiv-margin,0 10px 0 5px);
+  border-top:var(--scs-cdiv-border,1px solid rgba(255,255,255,.08));box-sizing:border-box;}
+.scs-chdr{display:flex;align-items:center;gap:8px;margin:0 5px;
+  padding:var(--scs-chdr-padding,5px 10px);font-size:var(--scs-chdr-fontsize,12px);
+  color:var(--scs-chdr-color,inherit);opacity:var(--scs-chdr-opacity,.55);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.scs-chtml{margin:0 5px;}
+.scs-ckbd{flex:none;font-size:var(--scs-kbd-fontsize,14px);
+  color:var(--scs-kbd-color,inherit);opacity:var(--scs-kbd-opacity,.6);white-space:nowrap;}
+/* Native "No results" is a non-selectable row with the normal option layout
+   (empty icon slot + left-aligned label), not a dimmed/centered message. */
+.scs-noresults{display:flex;align-items:center;gap:8px;padding:5px 10px;
+  margin:0 5px;font-size:14px;cursor:default;}
+.scs-noresults .scs-icon{flex:none;min-width:16px;}
+.scs-noresults .scs-label{flex:1;}
+/* Veil that hides the native palette while we drive it. opacity:0 (NOT
+   visibility:hidden) is deliberate: a visibility:hidden element can't receive focus,
+   which stops the native palette from focusing its own input on open — and that
+   focus is what lets us locate its component in ~5ms instead of a ~1s tree-walk.
+   opacity:0 hides it just as completely while keeping it focusable. Scoped under a
+   class on <html> so a crash/unload can't leave the app veiled (removed in onUnload). */
+html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !important;}
 `;
 
 const MAX_RESULTS = 40;
 const SEARCH_LIMIT = 100;
 const DEBOUNCE_MS = 120;
+const JUMP_PLACEHOLDER = "Search a doc name, date, user, or command...";
+const CMD_PLACEHOLDER = "Search a command...";
+const VEIL_CLASS = "scs-cmdveil";
+// Native palette waits: catalog is ready ~7ms after a synthetic ⌘P; these are
+// generous upper bounds, not expected latencies.
+const NATIVE_FOLLOWUP_WAIT_MS = 180;
 const DYN_ALLOW_LIMIT = 500; // per dynamic view, when resolving its member records
 // New records aren't immediately readable after createRecord (see memory:
 // thymer-sdk-write-read-model) — poll before navigating.
@@ -100,6 +152,9 @@ export class Plugin extends AppPlugin {
         this._recCol = new Map();     // recordGuid -> collection entry
         this._dynAllowRecs = new Set(); // record guids rescued by a visible dynamic view
         this._dynAllowCols = new Set(); // collection guids fully rescued ("*" = all)
+        this._nativePal = null;       // kept-alive veiled native palette (command mode)
+        this._appRoot = null;         // cached app-root component (palette tree walk)
+        this._opening = false;        // command-mode open in flight (before overlay)
 
         this._keyHandler = (e) => this._onGlobalKey(e);
         window.addEventListener("keydown", this._keyHandler, true);
@@ -115,6 +170,7 @@ export class Plugin extends AppPlugin {
 
     onUnload() {
         this._close();
+        document.documentElement.classList.remove(VEIL_CLASS); // never leave the app veiled
         window.removeEventListener("keydown", this._keyHandler, true);
     }
 
@@ -124,12 +180,26 @@ export class Plugin extends AppPlugin {
         if (!e.isTrusted) return; // never react to our own synthetic dispatches
         const key = (e.key || "").toLowerCase();
         const cmd = e.metaKey || e.ctrlKey;
-        if (cmd && !e.shiftKey && !e.altKey && key === "k") {
+        const chord = cmd && !e.shiftKey && !e.altKey;
+        if (chord && (key === "k" || key === "p")) {
+            // A VISIBLE native palette (opened via ⌘⇧P, the escape hatch) keeps its
+            // own ⌘K/⌘P handling — ours is only for the veiled instance we drive.
+            if (!this._overlay && document.querySelector(".cmdpal--dialog")) return;
             e.preventDefault();
             e.stopImmediatePropagation();
             e.stopPropagation();
-            if (this._overlay) this._close();
-            else this._open();
+            const inCmd = this._level.mode === "cmd-root" || this._level.mode === "cmd-cat";
+            if (key === "k") {
+                // Native: ⌘K closes an open @ palette, switches a > palette to @.
+                if (!this._overlay) this._open();
+                else if (inCmd) this._switchToJumpMode();
+                else this._close();
+            } else {
+                // Native: ⌘P closes an open > palette, switches an @ palette to >.
+                if (!this._overlay) this._open("commands");
+                else if (inCmd) this._close();
+                else this._switchToCommandMode("");
+            }
             return;
         }
         if (this._overlay && key === "escape") {
@@ -141,12 +211,17 @@ export class Plugin extends AppPlugin {
     }
 
     _back() {
-        if (this._level.mode !== "root") {
+        if (this._level.mode === "cmd-cat") {
+            this._level = { mode: "cmd-root" };
+            if (this._input) this._input.value = "";
+            this._render();
+        } else if (this._level.mode === "root" || this._level.mode === "cmd-root") {
+            // Native Esc semantics: > root closes outright (no fallback to @ mode).
+            this._close();
+        } else {
             this._level = { mode: "root" };
             if (this._input) this._input.value = "";
             this._render();
-        } else {
-            this._close();
         }
     }
 
@@ -234,12 +309,29 @@ export class Plugin extends AppPlugin {
 
     // ---------- open/close ----------
 
-    _open() {
-        if (this._overlay) return;
+    _open(mode) {
+        if (this._overlay || this._opening) return;
         this._prevFocus = document.activeElement;
-        this._level = { mode: "root" };
+        // Cache the app root now, while focus is still in the app (a real component),
+        // so command-mode palette lookups work regardless of later focus moves.
+        this._cacheAppRoot();
+        this._level = { mode: mode === "commands" ? "cmd-root" : "root" };
         this._searchRecs = [];
         this._refreshCollections();
+        // Command mode: open the kept-alive native palette in the background (its
+        // catalog powers our render). Mark _opening so the async open isn't cancelled
+        // before our overlay exists. Re-render + focus when it lands (~15 ms); the
+        // first render shows Loading.
+        if (mode === "commands") {
+            this._opening = true;
+            this._ensureNativePal().then(() => {
+                this._opening = false;
+                if (this._overlay && (this._level.mode === "cmd-root" || this._level.mode === "cmd-cat")) {
+                    this._render();
+                    if (this._input) this._input.focus();
+                }
+            });
+        }
 
         const backdrop = document.createElement("div");
         backdrop.className = "scs-backdrop";
@@ -264,11 +356,19 @@ export class Plugin extends AppPlugin {
         this._crumb.style.display = "none";
         this._input = document.createElement("input");
         this._input.className = "scs-input";
-        this._input.placeholder = "Search a doc name, date, user, or command...";
+        this._input.placeholder = JUMP_PLACEHOLDER;
         this._input.addEventListener("input", () => {
-            // ">" as first char = native command mode (Cmd-P's palette) — delegate.
+            // ">" as first char in @ mode switches to command mode (the char is
+            // consumed, the rest stays as the query) — native behavior. The reverse
+            // ("@" typed in > mode) is literal text in native, so no special-casing.
             if (this._level.mode === "root" && this._input.value.startsWith(">")) {
-                this._delegateCommandMode();
+                this._switchToCommandMode(this._input.value.slice(1));
+                return;
+            }
+            if (this._level.mode === "cmd-root" || this._level.mode === "cmd-cat") {
+                // Command filtering is an in-memory fuzzysort pass — render per
+                // keystroke like native, no debounce.
+                this._render();
                 return;
             }
             clearTimeout(this._debounce);
@@ -282,14 +382,14 @@ export class Plugin extends AppPlugin {
         this._list = document.createElement("div");
         this._list.className = "scs-list";
 
-        const footer = document.createElement("div");
-        footer.className = "scs-footer";
-        footer.textContent =
+        this._footer = document.createElement("div");
+        this._footer.className = "scs-footer";
+        this._footer.textContent =
             "↑↓ Navigate · ↵ Select · ⇧↵ Use other panel · Esc Back/Close · ⌘⇧P Native palette";
 
         palette.appendChild(inputRow);
         palette.appendChild(this._list);
-        palette.appendChild(footer);
+        palette.appendChild(this._footer);
         backdrop.appendChild(palette);
         document.body.appendChild(backdrop);
         this._overlay = backdrop;
@@ -314,7 +414,13 @@ export class Plugin extends AppPlugin {
             '<div class="cmdpal--dialog"><div class="cmdpal--ac-container">' +
             '<div class="autocomplete--option autocomplete--option-selected">' +
             '<span class="autocomplete--option-label"><span class="autocomplete--hilite">x</span></span>' +
-            "</div></div></div>";
+            '<span class="autocomplete--option-right"><span class="autocomplete--kbd">' +
+            '<span class="kbdmod kbdmod-mac">⌘</span>K</span></span>' +
+            "</div>" +
+            '<div class="autocomplete--divider autocomplete--empty"></div>' +
+            '<div class="autocomplete-divider-heading autocomplete--empty">' +
+            '<span class="autocomplete--option-label">x</span></div>' +
+            "</div></div>";
         document.body.appendChild(box);
         const out = {};
         try {
@@ -337,12 +443,38 @@ export class Plugin extends AppPlugin {
                 put("--scs-hilite", hil.color);
                 if (hil.fontWeight) out["--scs-hilite-weight"] = hil.fontWeight;
             }
+            // Command-mode chrome: divider slot, heading rows, shortcut text — read
+            // whatever the active theme paints the native classes.
+            const cdiv = cs(".autocomplete--divider");
+            if (cdiv) {
+                if (cdiv.height) out["--scs-cdiv-height"] = cdiv.height;
+                if (cdiv.margin) out["--scs-cdiv-margin"] = cdiv.margin;
+                if (cdiv.borderTopWidth && cdiv.borderTopWidth !== "0px") {
+                    out["--scs-cdiv-border"] =
+                        `${cdiv.borderTopWidth} ${cdiv.borderTopStyle} ${cdiv.borderTopColor}`;
+                }
+            }
+            const chdr = cs(".autocomplete-divider-heading");
+            if (chdr) {
+                put("--scs-chdr-color", chdr.color);
+                if (chdr.fontSize) out["--scs-chdr-fontsize"] = chdr.fontSize;
+                if (chdr.padding) out["--scs-chdr-padding"] = chdr.padding;
+                if (chdr.opacity) out["--scs-chdr-opacity"] = chdr.opacity;
+            }
+            const ckbd = cs(".autocomplete--kbd");
+            if (ckbd) {
+                put("--scs-kbd-color", ckbd.color);
+                if (ckbd.fontSize) out["--scs-kbd-fontsize"] = ckbd.fontSize;
+                if (ckbd.opacity) out["--scs-kbd-opacity"] = ckbd.opacity;
+            }
         } catch (e) { /* fall back to CSS literals */ }
         box.remove();
         return out;
     }
 
-    _close() {
+    _close(opts) {
+        const keepNative = !!(opts && opts.keepNative);
+        this._opening = false; // cancel any in-flight command-mode open
         clearTimeout(this._debounce);
         this._searchToken++;
         if (this._overlay) {
@@ -353,11 +485,214 @@ export class Plugin extends AppPlugin {
         this._list = null;
         this._crumb = null;
         this._searchtype = null;
+        this._footer = null;
         this._rows = [];
-        if (this._prevFocus && this._prevFocus.isConnected) {
-            try { this._prevFocus.focus(); } catch (e) { /* focus is best-effort */ }
-        }
+        const prev = this._prevFocus;
         this._prevFocus = null;
+        // Cancel any in-flight command-mode open. Do this AFTER clearing _overlay so
+        // a still-polling _ensureNativePal sees no overlay and self-aborts.
+        this._opening = false;
+        if (keepNative) return; // command execution owns the palette + focus handoff
+        // Tear down the kept-alive native palette and lift the veil (also covers a
+        // mid-open palette: _ensureNativePal's poll aborts when the overlay is gone,
+        // and this destroys whatever is currently open).
+        if (this._nativePal || document.documentElement.classList.contains(VEIL_CLASS)) {
+            this._teardownNativePal();
+        }
+        if (prev && prev.isConnected) {
+            try { prev.focus(); } catch (e) { /* focus is best-effort */ }
+        }
+    }
+
+    // ---------- command-mode backend (one kept-alive native palette per session) ----
+    //
+    // The command catalog only lives inside a native-palette instance, which the app
+    // assembles from the current editor/panel context at open (~10 ms to populate) —
+    // reading it requires a real, open palette. We open ONE veiled native palette when
+    // command mode is entered and keep it alive for the whole session: rendering reads
+    // its live staticOptions/categoryFilters, and executing a command calls its own
+    // confirmOptionEx. On close we destroy it. Learned the hard way (see README.dev):
+    // a SINGLE synthetic ⌘P per session is reliable; repeated ⌘P (retries/toggles)
+    // desync the palette into a wedged empty-catalog state, and node.remove() desyncs
+    // its component — so we open exactly once and only ever destroy() to close.
+
+    _setVeil(on) {
+        document.documentElement.classList.toggle(VEIL_CLASS, !!on);
+    }
+
+    // The app's focused component. Belt-and-suspenders across realms: prefer the app
+    // window that owns our document, fall back to our own globalThis.
+    _gfc() {
+        try {
+            const w = document.defaultView;
+            if (w && w.g_focusedComponent) return w.g_focusedComponent;
+        } catch (e) { /* cross-realm access can throw */ }
+        return (typeof globalThis !== "undefined" && globalThis.g_focusedComponent) || null;
+    }
+
+    _climbRoot(comp) {
+        if (!comp) return null;
+        let root = comp, guard = 0;
+        while (root.parent && guard++ < 200) root = root.parent;
+        return root;
+    }
+
+    _cacheAppRoot() {
+        const root = this._climbRoot(this._gfc());
+        if (root) this._appRoot = root;
+    }
+
+    // Locate the LIVE native palette component for an open .cmdpal--dialog. Its DOM
+    // node has no back-reference to its component, so we DFS the component tree from
+    // a root climbed fresh from g_focusedComponent (the just-opened palette is the
+    // focused component during our flows), falling back to a cached root. Destroyed
+    // components whose nodes linger are skipped.
+    _findNativePal() {
+        const dialogs = [...document.querySelectorAll(".cmdpal--dialog")];
+        if (!dialogs.length) return null;
+        const roots = [];
+        const fresh = this._climbRoot(this._gfc());
+        if (fresh) { roots.push(fresh); this._appRoot = fresh; }
+        if (this._appRoot && this._appRoot !== fresh) roots.push(this._appRoot);
+        for (const root of roots) {
+            const stack = [root];
+            while (stack.length) {
+                const comp = stack.pop();
+                if (!comp) continue;
+                if (!comp._destroyed && dialogs.includes(comp.node)) return comp;
+                if (comp.children) for (const ch of comp.children) stack.push(ch);
+            }
+        }
+        return null;
+    }
+
+    // Close the native palette by its own destroy() — its Esc/cancel path ignores
+    // untrusted key events, and node.remove() desyncs the component (leaving it
+    // "open" so the next ⌘P toggles it closed), so destroy() is the only safe close.
+    _destroyPal(pal) {
+        const target = pal || (this._nativePal && !this._nativePal._destroyed ? this._nativePal : null) || this._findNativePal();
+        if (target && !target._destroyed && typeof target.destroy === "function"
+                && target.node && target.node.isConnected) {
+            try { target.destroy(); } catch (e) { /* best-effort */ }
+        }
+    }
+
+    _nativeAC() {
+        const p = this._nativePal;
+        return (p && !p._destroyed && p.node && p.node.isConnected && p.autocomplete
+            && (p.autocomplete.staticOptions || []).length) ? p.autocomplete : null;
+    }
+
+    // Ensure a single veiled native command palette is open and populated, stored on
+    // this._nativePal. Idempotent — reused across renders and executions in a session.
+    // ONE synthetic ⌘P (Thymer ignores isTrusted); if a stray palette is already open
+    // we destroy it first so our ⌘P opens fresh rather than toggling it closed.
+    async _ensureNativePal() {
+        if (this._nativeAC()) return this._nativePal;
+        this._nativePal = null;
+        // Close any stray dialog cleanly before opening (destroy, wait for detach).
+        for (let i = 0; i < 12 && document.querySelector(".cmdpal--dialog"); i++) {
+            this._destroyPal(this._findNativePal());
+            await new Promise((resolve) => setTimeout(resolve, 15));
+        }
+        if (!this._overlayOrOpening()) return null;
+        // Veil up front (opacity:0 keeps the palette invisible AND focusable, so it
+        // still focuses its own input on open — which is what makes _findNativePal
+        // locate it in ~5 ms). No flash: the palette is hidden from the first paint.
+        this._setVeil(true);
+        document.body.dispatchEvent(new KeyboardEvent("keydown", {
+            key: "p", code: "KeyP", keyCode: 80, which: 80,
+            metaKey: true, bubbles: true, cancelable: true,
+        }));
+        const deadline = Date.now() + 1500;
+        while (Date.now() < deadline) {
+            if (!this._overlayOrOpening()) { this._destroyPal(this._findNativePal()); this._setVeil(false); return null; }
+            const pal = this._findNativePal();
+            if (pal && pal.autocomplete && (pal.autocomplete.staticOptions || []).length) {
+                this._nativePal = pal;
+                if (this._input) this._input.focus(); // opening it moved focus; take it back
+                return pal;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        this._destroyPal(this._findNativePal());
+        this._setVeil(false);
+        return null;
+    }
+
+    _overlayOrOpening() {
+        return !!this._overlay || this._opening;
+    }
+
+    // Tear down the kept-alive palette and lift the veil (unless a follow-up widget
+    // is being handed to the user, in which case the caller keeps it visible).
+    _teardownNativePal() {
+        const pal = this._nativePal;
+        this._nativePal = null;
+        this._destroyPal(pal);
+        this._setVeil(false);
+    }
+
+    // Execute a command on the kept-alive palette via its own confirmOptionEx (takes
+    // the option object directly — no query typing, no ac.results race). The option is
+    // matched by field in staticOptions. If the palette is still open ~180 ms after
+    // confirm, the command opened a follow-up widget (theme picker, rename input,
+    // move/new-page picker) — unveil and hand the native dialog to the user.
+    async _execCommand(optSnap, otherPanel) {
+        const prev = this._prevFocus;
+        const pal = this._nativePal;
+        const ac = this._nativeAC();
+        this._close({ keepNative: true }); // tear down our overlay; keep the palette
+        if (!ac || typeof ac.confirmOptionEx !== "function") { this._teardownNativePal(); this._restoreFocus(prev); return; }
+        const opt = (ac.staticOptions || []).find((o) => optMatches(o, optSnap));
+        if (!opt) { this._teardownNativePal(); this._restoreFocus(prev); return; }
+        try {
+            ac.confirmOptionEx(opt, { shiftKey: !!otherPanel, preventDefault() {}, stopPropagation() {} });
+        } catch (e) { this._teardownNativePal(); this._restoreFocus(prev); return; }
+        await new Promise((resolve) => setTimeout(resolve, NATIVE_FOLLOWUP_WAIT_MS));
+        this._nativePal = null;
+        if (pal && pal.node && pal.node.isConnected) {
+            // Follow-up widget: unveil and hand the native dialog over.
+            this._setVeil(false);
+            const inp = pal.node.querySelector(".cmdpal--input");
+            if (inp) { try { inp.focus(); } catch (e) { /* best-effort */ } }
+        } else {
+            this._setVeil(false);
+            this._restoreFocus(prev);
+        }
+    }
+
+    _restoreFocus(prev) {
+        if (prev && prev.isConnected) {
+            try { prev.focus(); } catch (e) { /* best-effort */ }
+        }
+    }
+
+    // ---------- mode switching (@ ↔ >) ----------
+
+    _switchToCommandMode(query) {
+        if (!this._overlay) return;
+        this._level = { mode: "cmd-root" };
+        this._input.value = query || "";
+        this._render();
+        // Reuse the kept-alive palette if present, else open it now.
+        if (!this._nativeAC()) {
+            this._opening = true;
+            this._ensureNativePal().then(() => {
+                this._opening = false;
+                if (this._overlay && (this._level.mode === "cmd-root" || this._level.mode === "cmd-cat")) {
+                    this._render();
+                    if (this._input) this._input.focus();
+                }
+            });
+        }
+    }
+
+    _switchToJumpMode() {
+        if (!this._overlay) return;
+        this._level = { mode: "root" };
+        this._input.value = "";
+        this._render();
     }
 
     // ---------- input keys ----------
@@ -372,7 +707,11 @@ export class Plugin extends AppPlugin {
             e.preventDefault();
             const row = this._rows[this._sel];
             if (row) row.action({ otherPanel: e.shiftKey });
-        } else if (e.key === "Backspace" && !this._input.value && this._level.mode !== "root") {
+        } else if (e.key === "Backspace" && !this._input.value
+                && this._level.mode !== "root"
+                && this._level.mode !== "cmd-root" && this._level.mode !== "cmd-cat") {
+            // Backspace-on-empty goes back only in @ submenus; the native > mode
+            // does nothing on it (live-verified), so neither do we.
             e.preventDefault();
             this._back();
         }
@@ -406,12 +745,22 @@ export class Plugin extends AppPlugin {
     }
 
     _renderList(q) {
+        const isCmd = this._level.mode === "cmd-root" || this._level.mode === "cmd-cat";
         const entries =
             this._level.mode === "root" ? (q ? this._rootQueryEntries(q) : this._rootEmptyEntries())
+            : this._level.mode === "cmd-root" ? (q ? this._cmdSearchEntries(q) : this._cmdRootEmptyEntries())
+            : this._level.mode === "cmd-cat" ? this._cmdCatEntries(q)
             : this._level.mode === "collection" ? this._collectionEntries(q)
             : this._createPickEntries(q);
 
-        this._crumb.style.display = this._level.mode === "root" ? "none" : "";
+        // Mode chrome, matching native: '>' indicator, command placeholder, and NO
+        // footer in command mode (native hides its status bar there).
+        this._searchtype.textContent = isCmd ? ">" : "@";
+        this._input.placeholder = isCmd ? CMD_PLACEHOLDER : JUMP_PLACEHOLDER;
+        this._footer.style.display = isCmd ? "none" : "";
+
+        this._crumb.style.display =
+            (this._level.mode === "collection" || this._level.mode === "create-pick") ? "" : "none";
         this._crumb.textContent =
             this._level.mode === "collection" ? this._level.entry.name + " ›"
             : this._level.mode === "create-pick" ? "New page ›" : "";
@@ -420,9 +769,28 @@ export class Plugin extends AppPlugin {
         this._rows = [];
         let defaultSel = 0;
         for (const entry of entries) {
-            if (entry.divider) {
+            if (entry.divider || entry.divider5) {
                 const div = document.createElement("div");
-                div.className = "scs-divider";
+                div.className = entry.divider5 ? "scs-cdiv" : "scs-divider";
+                this._list.appendChild(div);
+                continue;
+            }
+            if (entry.hdr != null) {
+                // Labeled heading row (native autocomplete-divider-heading):
+                // "Change into", "Insert", "Workspace (...)", the doc-name header.
+                const div = document.createElement("div");
+                div.className = "scs-chdr";
+                div.innerHTML =
+                    (entry.icon ? `<span class="scs-icon">${iconHTML(entry.icon)}</span>` : "") +
+                    `<span>${esc(entry.hdr)}</span>`;
+                this._list.appendChild(div);
+                continue;
+            }
+            if (entry.html != null) {
+                // App-generated inert header markup (the settings user card).
+                const div = document.createElement("div");
+                div.className = "scs-chtml";
+                div.innerHTML = entry.html;
                 this._list.appendChild(div);
                 continue;
             }
@@ -443,9 +811,21 @@ export class Plugin extends AppPlugin {
             this._rows.push(row);
         }
         if (!this._rows.length) {
+            const isCmd = this._level.mode === "cmd-root" || this._level.mode === "cmd-cat";
             const empty = document.createElement("div");
-            empty.className = "scs-empty";
-            empty.textContent = q ? "No results" : "Loading…";
+            if (isCmd && !this._nativeAC()) {
+                // Catalog still loading (~100 ms). Show an empty list (just the palette
+                // chrome) rather than a "Loading" flash, so it fills in like native.
+                empty.className = "scs-empty";
+                empty.textContent = "";
+            } else if (isCmd && q) {
+                // Native: a non-selectable option-layout row (empty icon + label).
+                empty.className = "scs-noresults";
+                empty.innerHTML = '<span class="scs-icon"></span><span class="scs-label">No results</span>';
+            } else {
+                empty.className = "scs-empty";
+                empty.textContent = q ? "No results" : "Loading…";
+            }
             this._list.appendChild(empty);
         }
         this._select(Math.min(defaultSel, Math.max(0, this._rows.length - 1)));
@@ -454,16 +834,22 @@ export class Plugin extends AppPlugin {
     _rowEl(row, q) {
         const el = document.createElement("div");
         el.className = "scs-row";
-        const label = row.indices
+        const label = row.labelHTML != null
+            ? row.labelHTML
+            : row.indices
             ? highlightIndices(row.label, row.indices)
             : (row.noHighlight ? esc(row.label) : highlight(row.label, q));
         const parts = [
-            `<span class="scs-icon">${iconHTML(row.icon)}</span>`,
+            // Command rows keep an empty icon slot for alignment (native does the
+            // same); @ rows keep their "·" placeholder.
+            `<span class="scs-icon">${row.icon || !row.blankIcon ? iconHTML(row.icon) : ""}</span>`,
             `<span class="scs-label">${label}</span>`,
         ];
+        if (row.subHTML) parts.push(`<span class="scs-sub">${row.subHTML}</span>`);
+        else if (row.sub) parts.push(`<span class="scs-sub">${esc(row.sub)}</span>`);
+        if (row.kbdHTML) parts.push(`<span class="scs-ckbd">${row.kbdHTML}</span>`);
+        else if (row.shortcut) parts.push(`<span class="scs-key">${esc(row.shortcut)}</span>`);
         if (row.arrow) parts.push(`<span class="scs-arrow">→</span>`);
-        if (row.sub) parts.push(`<span class="scs-sub">${esc(row.sub)}</span>`);
-        if (row.shortcut) parts.push(`<span class="scs-key">${esc(row.shortcut)}</span>`);
         el.innerHTML = parts.join("");
         return el;
     }
@@ -477,7 +863,7 @@ export class Plugin extends AppPlugin {
             icon: "ti-chevron-right",
             shortcut: "⌘P",
             noHighlight: true,
-            action: () => this._delegateCommandMode(),
+            action: () => this._switchToCommandMode(""),
         });
         entries.push({ divider: true });
         for (const c of this._cols) {
@@ -734,6 +1120,155 @@ export class Plugin extends AppPlugin {
         this._render();
     }
 
+    // ---------- > command mode entries (rendered from the live native palette) ------
+
+    // The kept-alive palette's catalog, shaped like the old snapshot ({filters,
+    // options}) so the render code below is unchanged. Null until the palette opens.
+    _liveCat() {
+        const ac = this._nativeAC();
+        if (!ac) return null;
+        return { filters: ac.categoryFilters || [], options: ac.staticOptions || [] };
+    }
+
+    // Root, empty query: category rows (with their dividers) in filter order, then
+    // every option whose category has no submenu filter (the flat insert/edit
+    // sections), in catalog order, rendering headings and dividers.
+    _cmdRootEmptyEntries() {
+        const cat = this._liveCat();
+        if (!cat) return [];
+        const entries = [];
+        const catValues = new Set();
+        for (const f of cat.filters || []) {
+            if (f.type === ":cat:div") { entries.push({ divider5: true }); continue; }
+            if (f.type !== ":cat") continue;
+            catValues.add(f.value);
+            entries.push(this._cmdCatRow(f, null));
+        }
+        for (const o of cat.options || []) {
+            if (o.category && catValues.has(o.category)) continue;
+            if (o.showOnlyWhenSearching) continue;
+            const entry = this._cmdOptEntry(o, null);
+            if (entry) entries.push(entry);
+        }
+        return entries;
+    }
+
+    // Search: the native pipeline, run with the app's own fuzzysort — category rows
+    // matched on [label, tag] and kept in front; options matched on
+    // [label, tag, _normalizedLabel] with per-option scoreFactor; weak matches
+    // (score < -60000) dropped; equal scores tie-broken alphabetically.
+    _cmdSearchEntries(q) {
+        const cat = this._liveCat();
+        const fz = appFuzzysort();
+        if (!cat || !fz) return [];
+        const filters = (cat.filters || []).filter((f) => f.type === ":cat");
+        const catRes = fz.go(q, filters, { keys: ["label", "tag"] });
+        const opts = (cat.options || []).filter((o) => !o.pinned);
+        const optRes = fz.go(q, opts, {
+            keys: ["label", "tag", "_normalizedLabel"],
+            scoreFn: cmdScoreFn,
+        }).filter(cmdScoreCutoff);
+        const all = [...catRes, ...optRes];
+        // Stable sort: keeps category rows in front and score order intact; only
+        // equal scores reorder (alphabetically by normalized label) — like native.
+        all.sort((a, b) => a.score !== b.score
+            ? 0
+            : normLabel(a.obj && a.obj.label).localeCompare(normLabel(b.obj && b.obj.label)));
+        const entries = [];
+        for (const r of all) {
+            const o = r.obj;
+            if (!o) continue;
+            if (o.type === ":cat") { entries.push(this._cmdCatRow(o, r)); continue; }
+            if (o.hideWhenSearching || o.type === ":hdr") continue;
+            const entry = this._cmdOptEntry(o, r);
+            if (entry && entry.action) entries.push(entry); // headings/dividers can't match
+        }
+        for (const o of (cat.options || []).filter((x) => x.pinned).reverse()) {
+            const entry = this._cmdOptEntry(o, null);
+            if (entry) entries.unshift(entry);
+        }
+        return entries;
+    }
+
+    // Category submenu: "← Back" (selectable, like native), optional hint, then the
+    // category's options — catalog order when browsing, fuzzysort-ranked when typing.
+    _cmdCatEntries(q) {
+        const cat = this._liveCat();
+        if (!cat) return [];
+        const filter = this._level.filter;
+        const entries = [{
+            label: "← Back", noHighlight: true, blankIcon: true,
+            action: () => this._back(),
+        }];
+        if (filter.hint) entries.push({ static: filter.hint });
+        const opts = (cat.options || []).filter((o) => o.category === filter.value);
+        if (!q) {
+            for (const o of opts) {
+                if (o.showOnlyWhenSearching) continue;
+                const entry = this._cmdOptEntry(o, null);
+                if (entry) entries.push(entry);
+            }
+        } else {
+            const fz = appFuzzysort();
+            if (!fz) return entries;
+            const res = fz.go(q, opts.filter((o) => !o.pinned), {
+                keys: ["label", "tag", "_normalizedLabel"],
+                scoreFn: cmdScoreFn,
+            }).filter(cmdScoreCutoff);
+            res.sort((a, b) => a.score !== b.score
+                ? 0
+                : normLabel(a.obj && a.obj.label).localeCompare(normLabel(b.obj && b.obj.label)));
+            for (const r of res) {
+                const o = r.obj;
+                if (!o || o.hideWhenSearching || o.type === ":hdr") continue;
+                const entry = this._cmdOptEntry(o, r);
+                if (entry && entry.action) entries.push(entry);
+            }
+        }
+        // Default selection: the first command after Back (native lands there).
+        const first = entries.find((en) => en.action && en.label !== "← Back");
+        if (first) first.defaultSel = true;
+        return entries;
+    }
+
+    _cmdCatRow(f, result) {
+        const isJumpHint = f.value === "searchtype_JUMP";
+        return {
+            label: f.label,
+            labelHTML: result ? fzHighlightKey(result[0], f.label) : esc(f.label),
+            icon: f.icon || null,
+            blankIcon: true,
+            arrow: true,
+            kbdHTML: f.kbd ? kbdHTML(f.kbd) : null,
+            action: () => {
+                if (isJumpHint) { this._switchToJumpMode(); return; }
+                this._level = { mode: "cmd-cat", filter: f };
+                this._input.value = "";
+                this._render();
+            },
+        };
+    }
+
+    // One catalog option → one entry. Headings/dividers/HTML headers render as
+    // non-selectable chrome; everything else is an executable command row.
+    _cmdOptEntry(o, result) {
+        if (o.type === ":div") return { divider5: true };
+        if (o.type === ":hdr") return { hdr: o.label || "", icon: o.icon || null };
+        if (o.type === ":html:hdr") return { html: (o.htmlHeader && o.htmlHeader.html) || "" };
+        if (o.type) return null; // unknown chrome type — skip rather than guess
+        const showTag = !o.hideTag && o.tag && result && result[1] && result[1].score != null;
+        return {
+            cmdOpt: o,
+            label: o.label || "",
+            labelHTML: result ? fzHighlightKey(result[0], o.label || "") : esc(o.label || ""),
+            icon: o.icon || null,
+            blankIcon: true,
+            subHTML: showTag ? "&gt;" + fzHighlightKey(result[1], o.tag) : null,
+            kbdHTML: o.kbd ? kbdHTML(o.kbd) : null,
+            action: (opts) => this._execCommand(o, opts && opts.otherPanel),
+        };
+    }
+
     // ---------- actions ----------
 
     async _targetPanel(otherPanel) {
@@ -832,18 +1367,6 @@ export class Plugin extends AppPlugin {
         this.ui.setActivePanel(panel);
     }
 
-    // Command mode is the native command palette — a modal, not a panel nav. Synthetic
-    // ⌘P opens it directly (Thymer's listeners ignore isTrusted), so there's no
-    // intermediate-modal flash: the palette we open IS the destination.
-    _delegateCommandMode() {
-        this._close();
-        setTimeout(() => {
-            (document.activeElement || document.body).dispatchEvent(new KeyboardEvent("keydown", {
-                key: "p", code: "KeyP", keyCode: 80, which: 80,
-                metaKey: true, bubbles: true, cancelable: true,
-            }));
-        }, 50);
-    }
 }
 
 // ---------- helpers ----------
@@ -922,6 +1445,82 @@ function iconHTML(icon) {
     if (!icon) return "·";
     if (/^ti[- ]/.test(icon)) return `<i class="ti ${esc(icon)}"></i>`;
     return esc(icon);
+}
+
+// ---------- > command mode helpers ----------
+
+// Does a live native-palette option match the snapshot the user chose? The palette
+// rebuilds its option objects on every search (identity won't hold), so compare by
+// the fields that identify a command. value alone collides (Change Password/Change
+// Email share "change_password"; three Retro Banner rows share "set_type_ascii_art"
+// differing only in json.banner_style), so include label + category + json.
+function optMatches(a, b) {
+    if (!a || !b) return false;
+    return (a.value || "") === (b.value || "")
+        && (a.label || "") === (b.label || "")
+        && (a.category || "") === (b.category || "")
+        && JSON.stringify(a.json || null) === JSON.stringify(b.json || null);
+}
+
+// The app bundles fuzzysort (MIT, github.com/farzher/fuzzysort) and exposes its
+// instance globally; ranking with the SAME instance and options as the native
+// palette makes our result order identical by construction.
+function appFuzzysort() {
+    const fz = window.fuzzysort || window._fuzzysort;
+    return fz && typeof fz.go === "function" ? fz : null;
+}
+
+// Native option score: best key match, scaled by the option's scoreFactor
+// (fuzzysort scores are ≤ 0, so dividing by a factor > 1 boosts a row — e.g.
+// Set Theme 4.2, Toggle Day/Night Theme 0.7). Returns null for "no match".
+function cmdScoreFn(keyResults) {
+    let best = -Infinity;
+    for (let i = 0; i < keyResults.length; i++) {
+        const r = keyResults[i];
+        if (!r) continue;
+        let s = r.score == null ? -Infinity : r.score;
+        const factor = keyResults.obj && keyResults.obj.scoreFactor;
+        if (factor) s = (s || 0) * (1 / factor);
+        if (s > best) best = s;
+    }
+    return best === -Infinity ? null : best;
+}
+
+// Native drops weak matches below -60000 (checked on the label key and the total).
+function cmdScoreCutoff(r) {
+    if (r[0] && r[0].score && r[0].score < -6e4) return false;
+    if (typeof r.score === "number" && r.score && r.score < -6e4) return false;
+    return true;
+}
+
+// Tie-break normalization: diacritic-strip + lowercase (NFD, drop combining marks).
+function normLabel(s) {
+    if (!s || typeof s !== "string") return "";
+    try { return s.normalize("NFD").replace(/\p{M}/gu, "").toLocaleLowerCase(); }
+    catch (e) { return s.toLowerCase(); }
+}
+
+// Highlight one key's fuzzysort match as <mark> spans. fuzzysort.highlight returns
+// raw target text around the tags, so mark with sentinels, escape, then swap.
+function fzHighlightKey(keyResult, label) {
+    const fz = appFuzzysort();
+    if (!fz || !keyResult || keyResult.score == null) return esc(label);
+    let h = null;
+    try { h = fz.highlight(keyResult, "\u0001", "\u0002"); } catch (e) { /* fall through */ }
+    if (!h) return esc(label);
+    return esc(h).split("\u0001").join("<mark>").split("\u0002").join("</mark>");
+}
+
+// Shortcut display: native wraps modifier/arrow glyphs in kbdmod spans (the app's
+// stylesheet styles those globally); plain characters stay as-is.
+const KBD_GLYPHS = new Set(["⌫", "⌦", "↵", "⇧", "⌃", "⌥", "⌘", "→", "←", "↑", "↓", "⇥"]);
+function kbdHTML(kbd) {
+    if (kbd && typeof kbd === "object") return kbd.safeHtml || "";
+    let out = "";
+    for (const ch of String(kbd || "")) {
+        out += KBD_GLYPHS.has(ch) ? `<span class="kbdmod kbdmod-mac">${esc(ch)}</span>` : esc(ch);
+    }
+    return out;
 }
 
 function safeIcon(record) {
