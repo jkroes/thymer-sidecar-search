@@ -1,5 +1,16 @@
 # sidecar-search
 
+## Releasing (do this before every subtree push)
+
+1. **Rebuild the bundle** — `./plugins/build.sh plugins/sidecar-search`. `dist/plugin.js` is the
+   shipped artifact (un-ignored for exactly this reason); editing `plugin.js` alone ships nothing.
+2. **Bump `version` in `plugin.json`.** The Plugins Manager's update check fires ONLY on a version
+   increase — no version means users never get the update, and an unchanged version is a silent
+   no-op. (Same rule applies to plugins-manager itself.)
+3. Push: `git subtree push --prefix=plugins/sidecar-search sidecar main` from the repo root.
+
+Hot-reload pushes are ephemeral — see "Findings from testing" below.
+
 **Status (2026-07-05): v3 — Cmd-P `>` command mode implemented + live-verified
 (CDP-driven, hot-reload push).** The clone now replaces BOTH Cmd-K (search) and Cmd-P
 (commands). Command mode renders the full native command catalog with byte-identical
