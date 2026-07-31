@@ -342,6 +342,10 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       if (!cols || !cols.length) return;
       const mapEntry = /* @__PURE__ */ __name((col, isDynamic) => {
         const conf = col.getConfiguration() || {};
+        const rawHiddenTypes = conf.custom && conf.custom.sidecarHiddenTypes || [];
+        const typeField = (conf.fields || []).find(
+          (f) => f && f.type === "choice" && f.active !== false && /^type$/i.test(f.label || "")
+        ) || null;
         return {
           col,
           guid: col.getGuid(),
@@ -349,6 +353,8 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
           itemName: conf.item_name || "page",
           icon: conf.icon || (isDynamic ? "ti-filter" : null),
           hidden: conf.show_cmdpal_items === false,
+          hiddenTypeIds: new Set(Array.isArray(rawHiddenTypes) ? rawHiddenTypes : []),
+          typeField,
           views: (conf.views || []).filter((v) => v.shown !== false),
           isJournal: !isDynamic && !!(col.isJournalPlugin && col.isJournalPlugin()),
           isDynamic
@@ -371,6 +377,8 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
     // collection's flag overrides its sources'. Views define membership as
     // source_collections (guids or "*") + a search query; a view with no query
     // holds every record of its sources.
+    // (See _recVisible for the separate, view-independent per-type hide-list —
+    // custom.sidecarHiddenTypes — used when a collection isn't fully hidden.)
     async _rebuildDynAllow() {
       const allowRecs = /* @__PURE__ */ new Set();
       const allowCols = /* @__PURE__ */ new Set();
@@ -399,10 +407,68 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       this._dynAllowCols = allowCols;
       if (this._overlay) this._render();
     }
-    _recVisible(recGuid, colEntry) {
-      if (!colEntry || !colEntry.hidden) return true;
-      if (this._dynAllowCols.has("*") || this._dynAllowCols.has(colEntry.guid)) return true;
-      return this._dynAllowRecs.has(recGuid);
+    _recVisible(record, colEntry) {
+      if (!colEntry) return true;
+      if (colEntry.hidden) {
+        if (this._dynAllowCols.has("*") || this._dynAllowCols.has(colEntry.guid)) return true;
+        return this._dynAllowRecs.has(record.guid);
+      }
+      if (colEntry.hiddenTypeIds.size) {
+        const prop = record.prop && (record.prop("Type") || record.prop("type"));
+        const typeIds = prop ? prop.selectedChoices ? prop.selectedChoices() : [prop.choice()].filter(Boolean) : [];
+        if (typeIds.some((id) => colEntry.hiddenTypeIds.has(id))) return false;
+      }
+      return true;
+    }
+    // ---------- Hide Types modal (custom.sidecarHiddenTypes editor) ----------
+    // Toaster-as-modal: messageHTML + a short setTimeout to wire click listeners
+    // once the toaster's DOM exists (same pattern as thymer-supertypes' picker).
+    // Lets users pick by the Type field's own labels — no raw choice-id lookup.
+    _openHideTypesModal(entry) {
+      const tf = entry.typeField;
+      const choices = (tf && tf.choices || []).filter((c) => c && c.active !== false);
+      if (!choices.length) return;
+      const working = new Set(entry.hiddenTypeIds);
+      const containerId = "_scs_hidetypes";
+      const rowHtml = /* @__PURE__ */ __name((c) => `<div data-type-id="${esc(c.id)}" style="cursor:pointer;display:flex;align-items:center;gap:8px;padding:4px 2px;"><input type="checkbox" ${working.has(c.id) ? "" : "checked"} style="pointer-events:none"><span>${esc(c.label || c.id)}</span></div>`, "rowHtml");
+      const html = `<div id="${containerId}" style="min-width:240px;padding:2px 0"><div style="font-size:11px;color:var(--text-secondary,#9ca3af);padding:0 0 8px">Unchecked types stay out of Sidecar Search, independent of any views.</div>` + choices.map(rowHtml).join("") + `</div>`;
+      const toaster = this.ui.addToaster({
+        title: `Hide Types \u2014 ${entry.name}`,
+        messageHTML: html,
+        dismissible: true,
+        primaryLabel: "Save",
+        cancelLabel: "Cancel",
+        // addToaster doesn't auto-close on primary/cancel — destroy() is on us.
+        onPrimary: /* @__PURE__ */ __name(() => {
+          toaster.destroy();
+          this._saveHiddenTypes(entry, working);
+        }, "onPrimary"),
+        onCancel: /* @__PURE__ */ __name(() => toaster.destroy(), "onCancel")
+      });
+      setTimeout(() => {
+        document.querySelectorAll(`#${containerId} [data-type-id]`).forEach((el) => {
+          el.addEventListener("click", () => {
+            const id = el.dataset.typeId;
+            if (working.has(id)) working.delete(id);
+            else working.add(id);
+            const cb = el.querySelector("input");
+            if (cb) cb.checked = !working.has(id);
+          });
+        });
+      }, 30);
+    }
+    async _saveHiddenTypes(entry, hiddenSet) {
+      const conf = entry.col.getConfiguration() || {};
+      conf.custom = conf.custom || {};
+      conf.custom.sidecarHiddenTypes = [...hiddenSet];
+      const ok = await entry.col.saveConfiguration(conf);
+      if (ok) entry.hiddenTypeIds = hiddenSet;
+      this.ui.addToaster({
+        title: "Sidecar Search",
+        message: ok ? "Hidden types saved." : "Couldn't save \u2014 try again.",
+        dismissible: true,
+        autoDestroyTime: 2500
+      });
     }
     // Workspace hashtags (the native Tags pseudo-collection). No SDK API exists;
     // the sidebar's cached collection controllers expose getTagsInWorkspace(), a
@@ -811,12 +877,19 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
           icon: "ti-settings",
           action: /* @__PURE__ */ __name(() => this._openCollectionSettings(c), "action")
         });
+        if (c.typeField) {
+          add(5, fuzzyMatch(q, `${c.name}: Hide Types from Sidecar...`), {
+            label: `${c.name}: Hide Types from Sidecar...`,
+            icon: "ti-eye-off",
+            action: /* @__PURE__ */ __name(() => this._openHideTypesModal(c), "action")
+          });
+        }
       }
       const seen = /* @__PURE__ */ new Set();
       for (const [guid, records] of this._colRecords) {
         const colEntry = this._cols.find((c) => c.guid === guid);
         for (const r of records) {
-          if (!this._recVisible(r.guid, colEntry)) continue;
+          if (!this._recVisible(r, colEntry)) continue;
           const m = fuzzyMatch(q, r.getName() || "");
           if (!m) continue;
           seen.add(r.guid);
@@ -826,7 +899,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
       for (const r of this._searchRecs) {
         if (seen.has(r.guid)) continue;
         const colEntry = this._recCol.get(r.guid) || null;
-        if (!this._recVisible(r.guid, colEntry)) continue;
+        if (!this._recVisible(r, colEntry)) continue;
         const m = fuzzyMatch(q, r.getName() || "");
         add(6, m || { score: 0, indices: [] }, this._pageRow(r, colEntry));
       }
@@ -1028,6 +1101,13 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
         icon: "ti-settings",
         action: /* @__PURE__ */ __name(() => this._openCollectionSettings(entry), "action")
       });
+      if (entry.typeField) {
+        actions.push({
+          label: `${entry.name}: Hide Types from Sidecar...`,
+          icon: "ti-eye-off",
+          action: /* @__PURE__ */ __name(() => this._openHideTypesModal(entry), "action")
+        });
+      }
       entries.push(...filter(actions));
       if (entry.isJournal) {
         const level = this._level;
@@ -1053,7 +1133,7 @@ html.scs-cmdveil .cmdpal--dialog{opacity:0 !important;pointer-events:none !impor
         return this._fixSubmenuSel(entries, q);
       }
       if (entry.isDynamic) return this._fixSubmenuSel(entries, q);
-      const records = (this._colRecords.get(entry.guid) || []).filter((r) => this._recVisible(r.guid, entry));
+      const records = (this._colRecords.get(entry.guid) || []).filter((r) => this._recVisible(r, entry));
       const itemRows = filter(records.map((r) => {
         const row = this._pageRow(r, entry);
         row.sub = null;
