@@ -1,8 +1,8 @@
 # sidecar-search
 
-## Releasing (do this before every subtree push)
+## Releasing (do this before every push)
 
-1. **Rebuild the bundle** — `./plugins/build.sh plugins/sidecar-search`. `dist/plugin.js` is the
+1. **Rebuild the bundle** — `./build.sh .`. `dist/plugin.js` is the
    shipped artifact (un-ignored for exactly this reason); editing `plugin.js` alone ships nothing.
 2. **Bump `version` in `plugin.json`.** The Plugins Manager's update check fires ONLY on a version
    increase — no version means users never get the update, and an unchanged version is a silent

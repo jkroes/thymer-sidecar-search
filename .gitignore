@@ -1,3 +1,8 @@
+# --- linked into the shared cache, NOT committed (run ./setup.sh to materialize) ---
+/sdk
+/bin/thymercli
+/examples
+
 node_modules/
 .DS_Store
 *.log
